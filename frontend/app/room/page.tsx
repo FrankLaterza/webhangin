@@ -133,10 +133,12 @@ function AvatarMesh({ shape, color, animation, isMoving }: { shape: string; colo
 }
 
 // Player avatar component with animation support
-function PlayerAvatar({ player, animation, isTalking }: { player: PlayerData; animation: AnimationType; isTalking?: boolean }) {
+function PlayerAvatar({ player, animation, isTalking, audioStream }: { player: PlayerData; animation: AnimationType; isTalking?: boolean; audioStream?: MediaStream }) {
     const groupRef = useRef<THREE.Group>(null);
     const { triggerAnimation, updateAnimation } = usePlayerAnimation();
     const micTexture = useTexture('/assets/textures/mic-talking-indicator_sprite_sheet.png');
+    const { camera } = useThree();
+    const positionalAudioRef = useRef<THREE.PositionalAudio | null>(null);
 
     // Configure sprite sheet texture
     useEffect(() => {
@@ -146,6 +148,45 @@ function PlayerAvatar({ player, animation, isTalking }: { player: PlayerData; an
             micTexture.offset.set(0, 0);
         }
     }, [micTexture]);
+
+    // Set up spatial audio
+    useEffect(() => {
+        if (!audioStream || !groupRef.current) return;
+
+        // Get or create AudioListener on camera
+        let listener = (camera as any).audioListener;
+        if (!listener) {
+            listener = new THREE.AudioListener();
+            camera.add(listener);
+            (camera as any).audioListener = listener;
+        }
+
+        // Create positional audio
+        const positionalAudio = new THREE.PositionalAudio(listener);
+        const audioContext = listener.context;
+        const source = audioContext.createMediaStreamSource(audioStream);
+        positionalAudio.setNodeSource(source);
+
+        // Configure spatial audio settings
+        positionalAudio.setRefDistance(3); // Distance where volume starts to decrease
+        positionalAudio.setMaxDistance(20); // Maximum distance for audio
+        positionalAudio.setRolloffFactor(1.5); // How quickly volume decreases
+        positionalAudio.setDistanceModel('linear'); // Linear falloff
+
+        // Attach to player position
+        groupRef.current.add(positionalAudio);
+        positionalAudioRef.current = positionalAudio;
+
+        console.log(`Spatial audio attached for player ${player.id}`);
+
+        return () => {
+            if (positionalAudioRef.current) {
+                positionalAudioRef.current.disconnect();
+                groupRef.current?.remove(positionalAudioRef.current);
+                positionalAudioRef.current = null;
+            }
+        };
+    }, [audioStream, camera, player.id]);
 
     // Trigger animation when prop changes
     useEffect(() => {
@@ -878,12 +919,21 @@ function RoomPage() {
                         {remotePlayers.map((player) => {
                             // Check if this player is talking
                             const isTalking = talkingPlayers.has(player.id);
+
+                            // Find audio stream for this player
+                            const audioStream = remoteStreams.find((stream) => {
+                                if (stream.kind !== 'audio') return false;
+                                const playerId = publisherToPlayerRef.current.get(stream.publisherId);
+                                return playerId === player.id;
+                            })?.stream;
+
                             return (
                                 <PlayerAvatar
                                     key={player.id}
                                     player={player}
                                     animation={playerAnimations[player.id] || null}
                                     isTalking={isTalking}
+                                    audioStream={audioStream}
                                 />
                             );
                         })}
@@ -991,7 +1041,10 @@ function RoomPage() {
                         {remoteStreams
                             .filter((s) => s.kind === 'audio')
                             .map((remote) => {
-                                const isTalking = talkingPlayers.has(remote.publisherId);
+                                const playerId = publisherToPlayerRef.current.get(remote.publisherId);
+                                const player = remotePlayers.find((p) => p.id === playerId);
+                                const isTalking = playerId ? talkingPlayers.has(playerId) : false;
+
                                 return (
                                     <div key={remote.publisherId} className="flex items-center gap-2 bg-gray-700 rounded px-2 py-1">
                                         {isTalking ? (
@@ -1006,13 +1059,10 @@ function RoomPage() {
                                         ) : (
                                             <span className="text-gray-500 text-xs">🎤</span>
                                         )}
-                                        <span className="text-gray-300 text-xs flex-1">Audio {remote.publisherId.slice(0, 8)}</span>
-                                        <audio
-                                            autoPlay
-                                            ref={(el) => {
-                                                if (el && el.srcObject !== remote.stream) el.srcObject = remote.stream;
-                                            }}
-                                        />
+                                        <span className="text-gray-300 text-xs flex-1">
+                                            {player ? player.name : `Audio ${remote.publisherId.slice(0, 8)}`}
+                                        </span>
+                                        <span className="text-blue-400 text-xs">3D Audio</span>
                                     </div>
                                 );
                             })}
