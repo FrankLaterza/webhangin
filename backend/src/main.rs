@@ -79,6 +79,7 @@ async fn websocket_handler(
         activity: query.activity.clone(),
         position: Default::default(),
         rotation: 0.0,
+        is_moving: false,
     };
 
     // Route to themed room based on activity

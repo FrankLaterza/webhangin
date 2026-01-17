@@ -39,6 +39,7 @@ where
         player_data.id = player_id.clone();
         player_data.position = Position::default();
         player_data.rotation = 0.0;
+        player_data.is_moving = false;
         
         let mut players = self.players.lock().unwrap();
         players.insert(player_id.clone(), (addr, player_data));
@@ -72,11 +73,12 @@ where
         None
     }
 
-    pub fn update_player_position(&self, player_id: &str, position: Position, rotation: f32) {
+    pub fn update_player_position(&self, player_id: &str, position: Position, rotation: f32, is_moving: bool) {
         let mut players = self.players.lock().unwrap();
         if let Some((_, player_data)) = players.get_mut(player_id) {
             player_data.position = position;
             player_data.rotation = rotation;
+            player_data.is_moving = is_moving;
         }
     }
 
