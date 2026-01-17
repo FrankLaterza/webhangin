@@ -1,6 +1,5 @@
 mod streaming;
 
-use std::collections::HashMap;
 use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, Responder};
 use actix_web::web::{Data, Query};
 use actix_web_actors::ws;
@@ -14,7 +13,32 @@ use webrtc::api::media_engine;
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters};
 use webrtc::rtp_transceiver::RTCPFeedback;
 
-use streaming::{RoomOwner, StreamingSession};
+use streaming::{RoomOwner, StreamingSession, PlayerData};
+
+/// Query parameters for joining a room
+#[derive(Deserialize)]
+struct PlayerJoinQuery {
+    name: String,
+    shape: String,
+    color: String,
+    activity: String,
+}
+
+/// Map activity to themed room
+fn activity_to_room(activity: &str) -> (&'static str, &'static str) {
+    let activity_lower = activity.to_lowercase();
+    if activity_lower.contains("music") || activity_lower.contains("guitar") || activity_lower.contains("piano") {
+        ("music-lounge", "Music Lounge")
+    } else if activity_lower.contains("art") || activity_lower.contains("draw") || activity_lower.contains("paint") {
+        ("art-studio", "Art Studio")
+    } else if activity_lower.contains("code") || activity_lower.contains("program") || activity_lower.contains("study") {
+        ("focus-den", "Focus Den")
+    } else if activity_lower.contains("game") || activity_lower.contains("gaming") {
+        ("gaming-corner", "Gaming Corner")
+    } else {
+        ("hangout-hub", "Hangout Hub")
+    }
+}
 
 #[derive(Deserialize)]
 struct ClickRequest {
@@ -44,12 +68,22 @@ async fn websocket_handler(
     req: HttpRequest,
     room_owner: Data<Mutex<RoomOwner<StreamingSession>>>,
     stream: web::Payload,
+    query: Query<PlayerJoinQuery>,
 ) -> impl Responder {
-    let query = req.query_string();
+    // Extract player data from query params
+    let player_data = PlayerData {
+        id: String::new(), // Will be set by Room::add_player
+        name: query.name.clone(),
+        shape: query.shape.clone(),
+        color: query.color.clone(),
+        activity: query.activity.clone(),
+        position: Default::default(),
+        rotation: 0.0,
+    };
 
-    let parameters = Query::<HashMap<String, String>>::from_query(query)
-        .expect("Failed to parse query");
-    let room_id = parameters.get("room").expect("room is required");
+    // Route to themed room based on activity
+    let (room_id, room_theme) = activity_to_room(&query.activity);
+    tracing::info!("Player {} joining room {} (activity: {})", query.name, room_id, query.activity);
 
     let find = room_owner
         .as_ref()
@@ -66,14 +100,14 @@ async fn websocket_handler(
     match find {
         Some(room) => {
             tracing::info!("Room found, so joining it: {}", room_id);
-            let server = StreamingSession::new(room, room_owner.clone()).await;
+            let server = StreamingSession::new(room, room_owner.clone(), player_data).await;
             ws::start(server, &req, stream)
         }
         None => {
             let owner = room_owner.clone();
             let mut owner = owner.lock().await;
-            let room = owner.create_new_room(room_id.to_string(), config).await;
-            let server = StreamingSession::new(room, room_owner.clone()).await;
+            let room = owner.create_new_room(room_id.to_string(), room_theme.to_string(), config).await;
+            let server = StreamingSession::new(room, room_owner.clone(), player_data).await;
             ws::start(server, &req, stream)
         }
     }

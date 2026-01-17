@@ -3,19 +3,28 @@
 import { useEffect, useRef, useState } from 'react';
 import { PublishTransport, SubscribeTransport } from 'rheomesh';
 
+interface RemoteStream {
+  publisherId: string;
+  stream: MediaStream;
+}
+
 export default function StreamPage() {
   const [roomId, setRoomId] = useState('lobby');
   const [isConnected, setIsConnected] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
   const [status, setStatus] = useState('Disconnected');
+  const [remoteStreams, setRemoteStreams] = useState<RemoteStream[]>([]);
+  const [chatMessages, setChatMessages] = useState<string[]>([]);
+  const [chatInput, setChatInput] = useState('');
 
   const wsRef = useRef<WebSocket | null>(null);
   const publishTransportRef = useRef<PublishTransport | null>(null);
   const subscribeTransportRef = useRef<SubscribeTransport | null>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
-  const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const publisherIdsRef = useRef<string[]>([]);
+  const subscribedIdsRef = useRef<Set<string>>(new Set());
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   const peerConnectionConfig: RTCConfiguration = {
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
@@ -225,8 +234,9 @@ export default function StreamPage() {
       case 'Published':
         console.log('Publishers available:', message.publisherIds);
         message.publisherIds.forEach((publisherId: string) => {
-          // Don't subscribe to our own streams
-          if (!publisherIdsRef.current.includes(publisherId)) {
+          // Don't subscribe to our own streams or already subscribed
+          if (!publisherIdsRef.current.includes(publisherId) && !subscribedIdsRef.current.has(publisherId)) {
+            subscribedIdsRef.current.add(publisherId);
             subscribeToPublisher(publisherId);
           }
         });
@@ -234,7 +244,18 @@ export default function StreamPage() {
 
       case 'Subscribed':
         console.log('Subscribed to:', message.subscriberId);
-        setStatus('Receiving remote stream');
+        setStatus(`Receiving ${remoteStreams.length + 1} remote stream(s)`);
+        break;
+
+      case 'Unpublished':
+        console.log('Publisher removed:', message.publisherId);
+        subscribedIdsRef.current.delete(message.publisherId);
+        setRemoteStreams((prev) => prev.filter((s) => s.publisherId !== message.publisherId));
+        break;
+
+      case 'ChatMessage':
+        setChatMessages((prev) => [...prev, message.message]);
+        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
         break;
 
       default:
@@ -254,10 +275,23 @@ export default function StreamPage() {
 
     subscribeTransportRef.current.subscribe(publisherId).then((subscriber) => {
       const stream = new MediaStream([subscriber.track]);
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = stream;
-      }
+      setRemoteStreams((prev) => {
+        // Avoid duplicates
+        if (prev.some((s) => s.publisherId === publisherId)) return prev;
+        return [...prev, { publisherId, stream }];
+      });
     });
+  };
+
+  const sendChat = () => {
+    if (!wsRef.current || !chatInput.trim()) return;
+    wsRef.current.send(
+      JSON.stringify({
+        action: 'ChatMessage',
+        message: chatInput.trim(),
+      })
+    );
+    setChatInput('');
   };
 
   return (
@@ -313,14 +347,61 @@ export default function StreamPage() {
             />
           </div>
 
-          <div>
-            <h2 className="text-xl font-semibold mb-3">Remote Stream</h2>
-            <video
-              ref={remoteVideoRef}
-              autoPlay
-              playsInline
-              className="w-full bg-black rounded-lg border border-gray-700"
+          {remoteStreams.filter((s) => s.stream.getVideoTracks().length > 0).length === 0 ? (
+            <div className="bg-black rounded-lg border border-gray-700 flex items-center justify-center min-h-[200px]">
+              <p className="text-gray-500">Waiting for remote streams...</p>
+            </div>
+          ) : (
+            remoteStreams
+              .filter((s) => s.stream.getVideoTracks().length > 0)
+              .map((remote) => (
+                <div key={remote.publisherId}>
+                  <h2 className="text-xl font-semibold mb-3">Remote Stream</h2>
+                  <video
+                    autoPlay
+                    playsInline
+                    className="w-full bg-black rounded-lg border border-gray-700"
+                    ref={(el) => {
+                      if (el && el.srcObject !== remote.stream) {
+                        el.srcObject = remote.stream;
+                      }
+                    }}
+                  />
+                </div>
+              ))
+          )}
+        </div>
+
+        {/* Chat Panel */}
+        <div className="mt-8 bg-gray-800 rounded-lg border border-gray-700 p-4">
+          <h2 className="text-xl font-semibold mb-3">Chat</h2>
+          <div className="h-48 overflow-y-auto bg-gray-900 rounded p-3 mb-3">
+            {chatMessages.length === 0 ? (
+              <p className="text-gray-500 text-sm">No messages yet...</p>
+            ) : (
+              chatMessages.map((msg, idx) => (
+                <div key={idx} className="text-sm mb-1 text-gray-300">{msg}</div>
+              ))
+            )}
+            <div ref={chatEndRef} />
+          </div>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && sendChat()}
+              disabled={!isConnected}
+              placeholder="Type a message..."
+              className="flex-1 px-4 py-2 bg-gray-700 border border-gray-600 rounded text-white placeholder-gray-400 disabled:opacity-50"
             />
+            <button
+              onClick={sendChat}
+              disabled={!isConnected}
+              className="px-6 py-2 bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Send
+            </button>
           </div>
         </div>
 

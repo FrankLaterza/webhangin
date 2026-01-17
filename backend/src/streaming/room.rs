@@ -6,45 +6,101 @@ use rheomesh::config::MediaConfig;
 use rheomesh::router::Router;
 use rheomesh::worker::Worker;
 
+use super::handler::{PlayerData, Position};
+
 /// A room represents a virtual meeting space where users can publish and subscribe to media
 pub struct Room<T>
 where
     T: Actor,
 {
     pub id: String,
+    pub theme: String,
     pub router: Arc<Mutex<Router>>,
-    users: std::sync::Mutex<Vec<Addr<T>>>,
+    /// Maps player_id -> (actor address, player data)
+    players: std::sync::Mutex<HashMap<String, (Addr<T>, PlayerData)>>,
 }
 
 impl<T> Room<T>
 where
     T: Actor,
 {
-    pub fn new(id: String, router: Arc<Mutex<Router>>) -> Self {
+    pub fn new(id: String, theme: String, router: Arc<Mutex<Router>>) -> Self {
         Self {
             id,
+            theme,
             router,
-            users: std::sync::Mutex::new(Vec::new()),
+            players: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
-    pub fn add_user(&self, addr: Addr<T>) {
-        let mut users = self.users.lock().unwrap();
-        users.push(addr);
-        tracing::info!("User joined room {}. Total users: {}", self.id, users.len());
+    /// Add a player to the room, returns the player's ID
+    pub fn add_player(&self, addr: Addr<T>, mut player_data: PlayerData) -> String {
+        let player_id = uuid::Uuid::new_v4().to_string();
+        player_data.id = player_id.clone();
+        player_data.position = Position::default();
+        player_data.rotation = 0.0;
+        
+        let mut players = self.players.lock().unwrap();
+        players.insert(player_id.clone(), (addr, player_data));
+        tracing::info!("Player {} joined room {}. Total players: {}", player_id, self.id, players.len());
+        player_id
     }
 
-    pub fn remove_user(&self, addr: Addr<T>) -> usize {
-        let mut users = self.users.lock().unwrap();
-        users.retain(|u| u != &addr);
-        let remaining = users.len();
-        tracing::info!("User left room {}. Remaining users: {}", self.id, remaining);
+    /// Remove a player from the room, returns remaining player count
+    #[allow(dead_code)]
+    pub fn remove_player(&self, player_id: &str) -> usize {
+        let mut players = self.players.lock().unwrap();
+        players.remove(player_id);
+        let remaining = players.len();
+        tracing::info!("Player {} left room {}. Remaining players: {}", player_id, self.id, remaining);
         remaining
     }
 
-    pub fn get_peers(&self, addr: &Addr<T>) -> Vec<Addr<T>> {
-        let users = self.users.lock().unwrap();
-        users.iter().filter(|u| u != &addr).cloned().collect()
+    /// Remove a player by their actor address, returns (player_id, remaining count) if found
+    pub fn remove_player_by_addr(&self, addr: &Addr<T>) -> Option<(String, usize)> {
+        let mut players = self.players.lock().unwrap();
+        let player_id = players.iter()
+            .find(|(_, (a, _))| a == addr)
+            .map(|(id, _)| id.clone());
+        
+        if let Some(ref id) = player_id {
+            players.remove(id);
+            let remaining = players.len();
+            tracing::info!("Player {} left room {}. Remaining players: {}", id, self.id, remaining);
+            return Some((id.clone(), remaining));
+        }
+        None
+    }
+
+    pub fn update_player_position(&self, player_id: &str, position: Position, rotation: f32) {
+        let mut players = self.players.lock().unwrap();
+        if let Some((_, player_data)) = players.get_mut(player_id) {
+            player_data.position = position;
+            player_data.rotation = rotation;
+        }
+    }
+
+    pub fn get_player_data(&self, player_id: &str) -> Option<PlayerData> {
+        let players = self.players.lock().unwrap();
+        players.get(player_id).map(|(_, data)| data.clone())
+    }
+
+    pub fn get_all_players(&self) -> Vec<PlayerData> {
+        let players = self.players.lock().unwrap();
+        players.values().map(|(_, data)| data.clone()).collect()
+    }
+
+    pub fn get_peers(&self, player_id: &str) -> Vec<Addr<T>> {
+        let players = self.players.lock().unwrap();
+        players.iter()
+            .filter(|(id, _)| *id != player_id)
+            .map(|(_, (addr, _))| addr.clone())
+            .collect()
+    }
+
+    pub fn get_all_addrs(&self) -> Vec<Addr<T>> {
+        let players = self.players.lock().unwrap();
+        players.values().map(|(addr, _)| addr.clone()).collect()
     }
 }
 
@@ -72,13 +128,13 @@ where
         self.rooms.get(&room_id).cloned()
     }
 
-    pub async fn create_new_room(&mut self, room_id: String, config: MediaConfig) -> Arc<Room<T>> {
+    pub async fn create_new_room(&mut self, room_id: String, theme: String, config: MediaConfig) -> Arc<Room<T>> {
         let mut worker = self.worker.lock().await;
         let router = worker.new_router(config);
-        let room = Arc::new(Room::new(room_id.clone(), router));
+        let room = Arc::new(Room::new(room_id.clone(), theme.clone(), router));
 
         self.rooms.insert(room_id.clone(), room.clone());
-        tracing::info!("Created new room: {}", room_id);
+        tracing::info!("Created new room: {} (theme: {})", room_id, theme);
 
         room
     }
