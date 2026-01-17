@@ -64,7 +64,8 @@ function usePlayerAnimation() {
 }
 
 // Cat Avatar Component
-function CatAvatar({ animation }: { animation: AnimationType }) {
+// Cat Avatar Component
+function CatAvatar({ animation, isMoving }: { animation: AnimationType; isMoving: boolean }) {
     const { scene, animations } = useGLTF('/assets/models/TWISTED_cat_character.glb');
     // Clone scene using SkeletonUtils to properly handle SkinnedMeshes (animations)
     const clone = useMemo(() => SkeletonUtils.clone(scene), [scene]);
@@ -72,30 +73,49 @@ function CatAvatar({ animation }: { animation: AnimationType }) {
 
     useEffect(() => {
         // Log available animations once
-        // console.log(Object.keys(actions));
+        // console.log('Available animations:', Object.keys(actions));
     }, [actions]);
 
     useEffect(() => {
-        // Stop all animations
-        Object.values(actions).forEach(action => action?.fadeOut(0.5));
-
+        // Handle Jump (T-pose / Stop)
         if (animation === 'jump') {
-            const jumpAction = actions['Jump'] || actions['jump'] || Object.values(actions)[0];
-            jumpAction?.reset().fadeIn(0.1).play();
-        } else {
-            // Idle
-            const idleAction = actions['Idle'] || actions['idle'] || actions['Walk'] || Object.values(actions)[0];
-            idleAction?.fadeIn(0.5).play();
+            console.log('🐈 Animation: JUMP (Stop/T-pose)');
+            Object.values(actions).forEach(action => action?.fadeOut(0.1));
+            return;
         }
-    }, [animation, actions]);
+
+        // Handle Walking
+        if (isMoving) {
+            const walkAction = actions['Walk'];
+            // If walk is already playing, don't restart it
+            if (walkAction && !walkAction.isRunning()) {
+                console.log('🐈 Animation: WALK (Fade 0.1s)');
+                // Fade out others
+                Object.values(actions).forEach(a => a !== walkAction && a?.fadeOut(0.1));
+                walkAction.reset().fadeIn(0.1).play();
+            }
+            return;
+        }
+
+        // Handle Idle
+        const idleAction = actions['Idle'];
+        if (idleAction && !idleAction.isRunning()) {
+            console.log('🐈 Animation: IDLE (Fade 1.0s)');
+            // Fade out others
+            Object.values(actions).forEach(a => a !== idleAction && a?.fadeOut(1.0));
+            idleAction.reset().fadeIn(1.0).play();
+        }
+
+    }, [animation, isMoving, actions]);
 
     return <primitive object={clone} scale={0.5} position={[0, -0.5, 0]} />;
 }
 
 // Unified Avatar Mesh Component
-function AvatarMesh({ shape, color, animation }: { shape: string; color: string; animation: AnimationType }) {
+// Unified Avatar Mesh Component
+function AvatarMesh({ shape, color, animation, isMoving }: { shape: string; color: string; animation: AnimationType; isMoving: boolean }) {
     if (shape === 'cat') {
-        return <CatAvatar animation={animation} />;
+        return <CatAvatar animation={animation} isMoving={isMoving} />;
     }
 
     return (
@@ -122,15 +142,27 @@ function PlayerAvatar({ player, animation }: { player: PlayerData; animation: An
         }
     }, [animation, triggerAnimation]);
 
+    // Track movement for animation
+    const [isMoving, setIsMoving] = useState(false);
+    const isMovingRef = useRef(false);
+
     useFrame((_, delta) => {
         if (!groupRef.current) return;
 
+        const targetPos = new THREE.Vector3(player.position.x, player.position.y, player.position.z);
+
         // Smoothly interpolate to target position
-        groupRef.current.position.lerp(
-            new THREE.Vector3(player.position.x, player.position.y, player.position.z),
-            0.1
-        );
+        groupRef.current.position.lerp(targetPos, 0.1);
         groupRef.current.rotation.y = player.rotation;
+
+        // Determine if moving based on distance to target
+        const dist = groupRef.current.position.distanceTo(targetPos);
+        const moving = dist > 0.1;
+
+        if (moving !== isMovingRef.current) {
+            isMovingRef.current = moving;
+            setIsMoving(moving);
+        }
 
         // Apply animation offset
         const heightOffset = updateAnimation(delta);
@@ -140,7 +172,7 @@ function PlayerAvatar({ player, animation }: { player: PlayerData; animation: An
     return (
         <group ref={groupRef} position={[player.position.x, player.position.y, player.position.z]}>
             {/* Mesh handles shape rendering */}
-            <AvatarMesh shape={player.shape} color={player.color} animation={animation} />
+            <AvatarMesh shape={player.shape} color={player.color} animation={animation} isMoving={isMoving} />
 
             <Billboard position={[0, 1, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
                 <Text
@@ -192,6 +224,10 @@ function LocalPlayer({
         };
     }, []);
 
+    // Track movement state
+    const [isMoving, setIsMoving] = useState(false);
+    const isMovingRef = useRef(false);
+
     useFrame((_, delta) => {
         if (!groupRef.current) return;
 
@@ -227,9 +263,15 @@ function LocalPlayer({
             moved = true;
         }
 
+        // Update walking state
+        if (moved !== isMovingRef.current) {
+            isMovingRef.current = moved;
+            setIsMoving(moved);
+        }
+
         // Clamp to room boundaries
-        positionRef.current.x = Math.max(-10, Math.min(10, positionRef.current.x));
-        positionRef.current.z = Math.max(-10, Math.min(10, positionRef.current.z));
+        positionRef.current.x = Math.max(-5, Math.min(5, positionRef.current.x));
+        positionRef.current.z = Math.max(-5, Math.min(5, positionRef.current.z));
 
         // Continuous jump when spacebar is held
         if (keysPressed.current.has(' ') && !currentAnimation.current) {
@@ -264,7 +306,7 @@ function LocalPlayer({
 
     return (
         <group ref={groupRef} position={[player.position.x, player.position.y, player.position.z]}>
-            <AvatarMesh shape={player.shape} color={player.color} animation={currentAnimation.current} />
+            <AvatarMesh shape={player.shape} color={player.color} animation={currentAnimation.current} isMoving={isMoving} />
             <Billboard position={[0, 1, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
                 <Text
                     fontSize={0.3}
@@ -283,11 +325,11 @@ function LocalPlayer({
 function RoomFloor() {
     const floorTexture = useTexture('/assets/textures/floor_texture_v1.png');
     floorTexture.wrapS = floorTexture.wrapT = THREE.RepeatWrapping;
-    floorTexture.repeat.set(8, 8);
+    floorTexture.repeat.set(1, 1);
 
     return (
         <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.5, 0]}>
-            <planeGeometry args={[24, 24]} />
+            <planeGeometry args={[12, 12]} />
             <meshStandardMaterial map={floorTexture} />
         </mesh>
     );
@@ -297,28 +339,28 @@ function RoomFloor() {
 function RoomWalls() {
     const wallTexture = useTexture('/assets/textures/wall_texture_v1.png');
     wallTexture.wrapS = wallTexture.wrapT = THREE.RepeatWrapping;
-    wallTexture.repeat.set(4, 1);
+    wallTexture.repeat.set(1, 1);
 
     return (
         <group position={[0, 2.5, 0]}>
             {/* Back Wall */}
-            <mesh position={[0, 0, -12]}>
-                <planeGeometry args={[24, 6]} />
+            <mesh position={[0, 0, -6]}>
+                <planeGeometry args={[12, 6]} />
                 <meshStandardMaterial map={wallTexture} />
             </mesh>
             {/* Front Wall */}
-            <mesh position={[0, 0, 12]} rotation={[0, Math.PI, 0]}>
-                <planeGeometry args={[24, 6]} />
+            <mesh position={[0, 0, 6]} rotation={[0, Math.PI, 0]}>
+                <planeGeometry args={[12, 6]} />
                 <meshStandardMaterial map={wallTexture} />
             </mesh>
             {/* Left Wall */}
-            <mesh position={[-12, 0, 0]} rotation={[0, Math.PI / 2, 0]}>
-                <planeGeometry args={[24, 6]} />
+            <mesh position={[-6, 0, 0]} rotation={[0, Math.PI / 2, 0]}>
+                <planeGeometry args={[12, 6]} />
                 <meshStandardMaterial map={wallTexture} />
             </mesh>
             {/* Right Wall */}
-            <mesh position={[12, 0, 0]} rotation={[0, -Math.PI / 2, 0]}>
-                <planeGeometry args={[24, 6]} />
+            <mesh position={[6, 0, 0]} rotation={[0, -Math.PI / 2, 0]}>
+                <planeGeometry args={[12, 6]} />
                 <meshStandardMaterial map={wallTexture} />
             </mesh>
         </group>
@@ -594,7 +636,7 @@ export default function RoomPage() {
             <div className="flex-1 relative">
                 <Canvas>
                     <ambientLight intensity={0.4} />
-                    <pointLight position={[10, 10, 10]} intensity={0.8} />
+                    <pointLight position={[0, 4, 0]} intensity={108} />
                     <RoomFloor />
                     <RoomWalls />
                     <Suspense fallback={null}>
