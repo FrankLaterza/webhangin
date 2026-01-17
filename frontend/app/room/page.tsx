@@ -1,11 +1,12 @@
 'use client';
 
-import { useEffect, useRef, useState, Suspense } from 'react';
+import { useEffect, useRef, useState, Suspense, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { Text, Billboard } from '@react-three/drei';
+import { Text, Billboard, useTexture, useGLTF, useAnimations } from '@react-three/drei';
 import { PublishTransport, SubscribeTransport } from 'rheomesh';
 import * as THREE from 'three';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 
 interface Position {
     x: number;
@@ -62,6 +63,53 @@ function usePlayerAnimation() {
     return { triggerAnimation, updateAnimation, currentAnimation, animationProgress };
 }
 
+// Cat Avatar Component
+function CatAvatar({ animation }: { animation: AnimationType }) {
+    const { scene, animations } = useGLTF('/assets/models/TWISTED_cat_character.glb');
+    // Clone scene using SkeletonUtils to properly handle SkinnedMeshes (animations)
+    const clone = useMemo(() => SkeletonUtils.clone(scene), [scene]);
+    const { actions } = useAnimations(animations, clone);
+
+    useEffect(() => {
+        // Log available animations once
+        // console.log(Object.keys(actions));
+    }, [actions]);
+
+    useEffect(() => {
+        // Stop all animations
+        Object.values(actions).forEach(action => action?.fadeOut(0.5));
+
+        if (animation === 'jump') {
+            const jumpAction = actions['Jump'] || actions['jump'] || Object.values(actions)[0];
+            jumpAction?.reset().fadeIn(0.1).play();
+        } else {
+            // Idle
+            const idleAction = actions['Idle'] || actions['idle'] || actions['Walk'] || Object.values(actions)[0];
+            idleAction?.fadeIn(0.5).play();
+        }
+    }, [animation, actions]);
+
+    return <primitive object={clone} scale={0.5} position={[0, -0.5, 0]} />;
+}
+
+// Unified Avatar Mesh Component
+function AvatarMesh({ shape, color, animation }: { shape: string; color: string; animation: AnimationType }) {
+    if (shape === 'cat') {
+        return <CatAvatar animation={animation} />;
+    }
+
+    return (
+        <mesh>
+            {shape === 'circle' ? (
+                <sphereGeometry args={[0.5, 32, 32]} />
+            ) : (
+                <boxGeometry args={[0.8, 0.8, 0.8]} />
+            )}
+            <meshStandardMaterial color={color} />
+        </mesh>
+    );
+}
+
 // Player avatar component with animation support
 function PlayerAvatar({ player, animation }: { player: PlayerData; animation: AnimationType }) {
     const groupRef = useRef<THREE.Group>(null);
@@ -91,14 +139,9 @@ function PlayerAvatar({ player, animation }: { player: PlayerData; animation: An
 
     return (
         <group ref={groupRef} position={[player.position.x, player.position.y, player.position.z]}>
-            <mesh rotation={[0, player.rotation, 0]}>
-                {player.shape === 'circle' ? (
-                    <sphereGeometry args={[0.5, 32, 32]} />
-                ) : (
-                    <boxGeometry args={[0.8, 0.8, 0.8]} />
-                )}
-                <meshStandardMaterial color={player.color} />
-            </mesh>
+            {/* Mesh handles shape rendering */}
+            <AvatarMesh shape={player.shape} color={player.color} animation={animation} />
+
             <Billboard position={[0, 1, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
                 <Text
                     fontSize={0.3}
@@ -221,14 +264,7 @@ function LocalPlayer({
 
     return (
         <group ref={groupRef} position={[player.position.x, player.position.y, player.position.z]}>
-            <mesh>
-                {player.shape === 'circle' ? (
-                    <sphereGeometry args={[0.5, 32, 32]} />
-                ) : (
-                    <boxGeometry args={[0.8, 0.8, 0.8]} />
-                )}
-                <meshStandardMaterial color={player.color} />
-            </mesh>
+            <AvatarMesh shape={player.shape} color={player.color} animation={currentAnimation.current} />
             <Billboard position={[0, 1, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
                 <Text
                     fontSize={0.3}
@@ -245,11 +281,47 @@ function LocalPlayer({
 
 // Room floor
 function RoomFloor() {
+    const floorTexture = useTexture('/assets/textures/floor_texture_v1.png');
+    floorTexture.wrapS = floorTexture.wrapT = THREE.RepeatWrapping;
+    floorTexture.repeat.set(8, 8);
+
     return (
         <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.5, 0]}>
             <planeGeometry args={[24, 24]} />
-            <meshStandardMaterial color="#2a2a3a" />
+            <meshStandardMaterial map={floorTexture} />
         </mesh>
+    );
+}
+
+// Textured walls
+function RoomWalls() {
+    const wallTexture = useTexture('/assets/textures/wall_texture_v1.png');
+    wallTexture.wrapS = wallTexture.wrapT = THREE.RepeatWrapping;
+    wallTexture.repeat.set(4, 1);
+
+    return (
+        <group position={[0, 2.5, 0]}>
+            {/* Back Wall */}
+            <mesh position={[0, 0, -12]}>
+                <planeGeometry args={[24, 6]} />
+                <meshStandardMaterial map={wallTexture} />
+            </mesh>
+            {/* Front Wall */}
+            <mesh position={[0, 0, 12]} rotation={[0, Math.PI, 0]}>
+                <planeGeometry args={[24, 6]} />
+                <meshStandardMaterial map={wallTexture} />
+            </mesh>
+            {/* Left Wall */}
+            <mesh position={[-12, 0, 0]} rotation={[0, Math.PI / 2, 0]}>
+                <planeGeometry args={[24, 6]} />
+                <meshStandardMaterial map={wallTexture} />
+            </mesh>
+            {/* Right Wall */}
+            <mesh position={[12, 0, 0]} rotation={[0, -Math.PI / 2, 0]}>
+                <planeGeometry args={[24, 6]} />
+                <meshStandardMaterial map={wallTexture} />
+            </mesh>
+        </group>
     );
 }
 
@@ -524,6 +596,7 @@ export default function RoomPage() {
                     <ambientLight intensity={0.4} />
                     <pointLight position={[10, 10, 10]} intensity={0.8} />
                     <RoomFloor />
+                    <RoomWalls />
                     <Suspense fallback={null}>
                         {localPlayer && (
                             <LocalPlayer player={localPlayer} onMove={handlePlayerMove} onAnimation={handleAnimation} />
