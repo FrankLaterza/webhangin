@@ -18,6 +18,8 @@ where
     pub router: Arc<Mutex<Router>>,
     /// Maps player_id -> (actor address, player data)
     players: std::sync::Mutex<HashMap<String, (Addr<T>, PlayerData)>>,
+    /// Maps publisher_id -> player_id (tracks which player owns which publisher)
+    publishers: std::sync::Mutex<HashMap<String, String>>,
 }
 
 impl<T> Room<T>
@@ -30,6 +32,7 @@ where
             theme,
             router,
             players: std::sync::Mutex::new(HashMap::new()),
+            publishers: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -103,6 +106,26 @@ where
     pub fn get_all_addrs(&self) -> Vec<Addr<T>> {
         let players = self.players.lock().unwrap();
         players.values().map(|(addr, _)| addr.clone()).collect()
+    }
+
+    /// Register a publisher for a player
+    pub fn register_publisher(&self, publisher_id: String, player_id: String) {
+        let mut publishers = self.publishers.lock().unwrap();
+        publishers.insert(publisher_id.clone(), player_id.clone());
+        tracing::debug!("Registered publisher {} for player {}", publisher_id, player_id);
+    }
+
+    /// Unregister a publisher
+    pub fn unregister_publisher(&self, publisher_id: &str) {
+        let mut publishers = self.publishers.lock().unwrap();
+        publishers.remove(publisher_id);
+        tracing::debug!("Unregistered publisher {}", publisher_id);
+    }
+
+    /// Get all publishers with their player IDs
+    pub fn get_all_publishers(&self) -> Vec<(String, String)> {
+        let publishers = self.publishers.lock().unwrap();
+        publishers.iter().map(|(pub_id, player_id)| (pub_id.clone(), player_id.clone())).collect()
     }
 }
 

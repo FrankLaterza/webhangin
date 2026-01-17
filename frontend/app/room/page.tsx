@@ -525,6 +525,8 @@ function RoomPage() {
     const moveThrottleRef = useRef<number>(0);
     const [isMicActive, setIsMicActive] = useState(false);
     const [isMicMuted, setIsMicMuted] = useState(false);
+    const subscribeTransportReady = useRef<boolean>(false);
+    const pendingSubscriptions = useRef<Array<{publisherId: string, playerId: string}>>([]);
 
     const peerConnectionConfig: RTCConfiguration = {
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
@@ -641,6 +643,9 @@ function RoomPage() {
             if (localAudioStreamRef.current) {
                 localAudioStreamRef.current.getTracks().forEach((track) => track.stop());
             }
+            // Reset state on cleanup
+            subscribeTransportReady.current = false;
+            pendingSubscriptions.current = [];
             ws.close();
         };
     }, [searchParams]);
@@ -672,11 +677,17 @@ function RoomPage() {
             subscribeTransport.on('icecandidate', (candidate) => {
                 wsRef.current?.send(JSON.stringify({ action: 'SubscriberIce', candidate }));
             });
+
+            // Mark transport as ready immediately - it will negotiate when we subscribe
+            subscribeTransportReady.current = true;
         }
     };
 
     const handleMessage = (message: any) => {
-        console.log('Received:', message.action);
+        // Only log non-Pong messages to reduce console spam
+        if (message.action !== 'Pong') {
+            console.log('Received:', message.action);
+        }
 
         switch (message.action) {
             case 'Pong':
@@ -701,6 +712,23 @@ function RoomPage() {
 
             case 'PlayerLeft':
                 setRemotePlayers((prev) => prev.filter((p) => p.id !== message.playerId));
+                // Clean up any streams from this player
+                const leavingPlayerId = message.playerId;
+                setRemoteStreams((prev) => {
+                    const filtered = prev.filter((stream) => {
+                        const streamPlayerId = publisherToPlayerRef.current.get(stream.publisherId);
+                        return streamPlayerId !== leavingPlayerId;
+                    });
+                    console.log(`Player ${leavingPlayerId} left, removed ${prev.length - filtered.length} streams`);
+                    return filtered;
+                });
+                // Clean up publisher-to-player mappings for this player
+                publisherToPlayerRef.current.forEach((playerId, publisherId) => {
+                    if (playerId === leavingPlayerId) {
+                        publisherToPlayerRef.current.delete(publisherId);
+                        subscribedIdsRef.current.delete(publisherId);
+                    }
+                });
                 break;
 
             case 'PlayerMoved':
@@ -737,7 +765,18 @@ function RoomPage() {
                 if (subscribeTransportRef.current) {
                     subscribeTransportRef.current.setOffer(message.sdp).then((answer) => {
                         wsRef.current?.send(JSON.stringify({ action: 'Answer', sdp: answer }));
+
+                        // Process pending subscriptions (legacy - should not be needed anymore)
+                        if (pendingSubscriptions.current.length > 0) {
+                            const pending = [...pendingSubscriptions.current];
+                            pendingSubscriptions.current = [];
+                            pending.forEach(({ publisherId }) => {
+                                subscribeToPublisher(publisherId);
+                            });
+                        }
                     });
+                } else {
+                    console.error('❌ Cannot process Offer: subscribeTransport not initialized');
                 }
                 break;
 
@@ -751,15 +790,29 @@ function RoomPage() {
 
             case 'Published':
                 message.publisherIds.forEach((publisherId: string) => {
-                    // Map publisherId to playerId for talking indicator
-                    if (message.playerId) {
+                    // Map publisherId to playerId for talking indicator and stream association
+                    if (message.playerId && message.playerId !== '') {
                         publisherToPlayerRef.current.set(publisherId, message.playerId);
-                        console.log(`Mapped publisher ${publisherId} to player ${message.playerId}`);
                     }
 
-                    if (!publisherIdsRef.current.includes(publisherId) && !subscribedIdsRef.current.has(publisherId)) {
+                    // Only subscribe if this isn't our own publisher and we haven't subscribed yet
+                    const isOurPublisher = publisherIdsRef.current.includes(publisherId);
+                    const alreadySubscribed = subscribedIdsRef.current.has(publisherId);
+
+                    if (!isOurPublisher && !alreadySubscribed) {
                         subscribedIdsRef.current.add(publisherId);
-                        subscribeToPublisher(publisherId);
+
+                        // Subscribe immediately (transport is always ready after init)
+                        if (subscribeTransportReady.current) {
+                            subscribeToPublisher(publisherId);
+                        } else {
+                            // Fallback queue (shouldn't happen)
+                            console.warn(`Transport not ready, queueing subscription for ${publisherId}`);
+                            pendingSubscriptions.current.push({
+                                publisherId,
+                                playerId: message.playerId || ''
+                            });
+                        }
                     }
                 });
                 break;
@@ -780,27 +833,34 @@ function RoomPage() {
     };
 
     const subscribeToPublisher = (publisherId: string) => {
-        if (!subscribeTransportRef.current || !wsRef.current) return;
+        if (!subscribeTransportRef.current || !wsRef.current) {
+            console.error('Cannot subscribe: transport or websocket not available');
+            return;
+        }
 
         wsRef.current.send(JSON.stringify({ action: 'Subscribe', publisherId }));
 
         subscribeTransportRef.current.subscribe(publisherId).then((subscriber) => {
-            const stream = new MediaStream([subscriber.track]);
-            const kind = subscriber.track.kind as 'audio' | 'video';
-            console.log(`Subscribed to ${kind} track: ${publisherId}`);
+            const track = subscriber.track;
+            const stream = new MediaStream([track]);
+            const kind = track.kind as 'audio' | 'video';
+
+            console.log(`✅ Subscribed to ${kind} track`);
 
             // Start analyzing audio if this is an audio track
             if (kind === 'audio') {
-                // Use playerId from mapping, fallback to publisherId
                 const playerId = publisherToPlayerRef.current.get(publisherId) || publisherId;
-                console.log(`Starting audio analysis for player ${playerId} (publisher: ${publisherId})`);
                 analyzeAudioLevel(playerId, stream);
             }
 
             setRemoteStreams((prev) => {
-                if (prev.some((s) => s.publisherId === publisherId)) return prev;
+                if (prev.some((s) => s.publisherId === publisherId)) {
+                    return prev;
+                }
                 return [...prev, { publisherId, stream, kind }];
             });
+        }).catch((error) => {
+            console.error(`❌ Failed to subscribe:`, error);
         });
     };
 
@@ -835,6 +895,7 @@ function RoomPage() {
             if (publishTransportRef.current && wsRef.current) {
                 for (const track of stream.getTracks()) {
                     const publisher = await publishTransportRef.current.publish(track);
+                    console.log(`📤 Publishing ${track.kind} track`);
                     wsRef.current.send(JSON.stringify({ action: 'Offer', sdp: publisher.offer }));
                     wsRef.current.send(JSON.stringify({ action: 'Publish', publisherId: publisher.id }));
                     publisherIdsRef.current.push(publisher.id);
@@ -1065,9 +1126,12 @@ function RoomPage() {
                                     key={remote.publisherId}
                                     autoPlay
                                     playsInline
+                                    muted
                                     className="w-full h-20 bg-black rounded"
                                     ref={(el) => {
-                                        if (el && el.srcObject !== remote.stream) el.srcObject = remote.stream;
+                                        if (el && el.srcObject !== remote.stream) {
+                                            el.srcObject = remote.stream;
+                                        }
                                     }}
                                 />
                             ))}

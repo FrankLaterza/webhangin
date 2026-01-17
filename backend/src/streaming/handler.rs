@@ -107,20 +107,48 @@ impl Actor for StreamingSession {
         let address = ctx.address();
         let subscribe_transport = self.subscribe_transport.clone();
         let publish_transport = self.publish_transport.clone();
+
+        // Get all publisher IDs before closing transports
+        let publishers = self.publishers.clone();
+        let room = self.room.clone();
+        let player_id = self.player_id.clone();
+
         actix::spawn(async move {
+            // Close all publishers and notify peers
+            let publisher_ids: Vec<String> = {
+                let pubs = publishers.lock().await;
+                pubs.keys().cloned().collect()
+            };
+
+            for publisher_id in publisher_ids {
+                if let Some(publisher) = publishers.lock().await.remove(&publisher_id) {
+                    publisher.lock().await.close().await;
+
+                    // Unregister publisher from room
+                    room.unregister_publisher(&publisher_id);
+
+                    // Notify all peers that this publisher is gone
+                    room.get_peers(&player_id).iter().for_each(|peer| {
+                        peer.do_send(SendingMessage::Unpublished {
+                            publisher_id: publisher_id.clone(),
+                        });
+                    });
+                }
+            }
+
             let _ = subscribe_transport.close().await;
             let _ = publish_transport.close().await;
         });
-        
+
         // Notify peers before removing
         let player_id = self.player_id.clone();
         let peers = self.room.get_peers(&player_id);
         for peer in peers {
-            peer.do_send(SendingMessage::PlayerLeft { 
-                player_id: player_id.clone() 
+            peer.do_send(SendingMessage::PlayerLeft {
+                player_id: player_id.clone()
             });
         }
-        
+
         // Remove player from room
         if let Some((_, remaining)) = self.room.remove_player_by_addr(&address) {
             if remaining == 0 {
@@ -195,11 +223,23 @@ impl Handler<ReceivedMessage> for StreamingSession {
                         }))
                         .await;
 
-                    let router = room.router.lock().await;
-                    let ids = router.publisher_ids();
-                    tracing::info!("router publisher ids {:#?}", ids);
-                    // Send empty player_id for initial state since these are from all players
-                    address.do_send(SendingMessage::Published { publisher_ids: ids, player_id: String::new() });
+                    // Get all publishers with their player IDs from room tracking
+                    let all_publishers = room.get_all_publishers();
+                    tracing::debug!("Sending {} tracked publishers to new subscriber", all_publishers.len());
+
+                    // Group publishers by player_id
+                    let mut publishers_by_player: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+                    for (publisher_id, player_id) in all_publishers {
+                        publishers_by_player.entry(player_id).or_insert_with(Vec::new).push(publisher_id);
+                    }
+
+                    // Send one Published message per player
+                    for (player_id, publisher_ids) in publishers_by_player {
+                        address.do_send(SendingMessage::Published {
+                            publisher_ids,
+                            player_id,
+                        });
+                    }
                 });
             }
             ReceivedMessage::PublisherIce { candidate } => {
@@ -259,9 +299,15 @@ impl Handler<ReceivedMessage> for StreamingSession {
                     match publish_transport.publish(publisher_id).await {
                         Ok(publisher) => {
                             let track_id = publisher.lock().await.track_id.clone();
-                            tracing::debug!("published a track: {}", track_id);
+                            tracing::info!("Published track: {} for player: {}", track_id, player_id);
                             publishers.lock().await.insert(track_id.clone(), publisher);
-                            room.get_peers(&player_id).iter().for_each(|peer| {
+
+                            // Register publisher in room for tracking
+                            room.register_publisher(track_id.clone(), player_id.clone());
+
+                            let peers = room.get_peers(&player_id);
+                            tracing::debug!("Broadcasting to {} peers", peers.len());
+                            peers.iter().for_each(|peer| {
                                 peer.do_send(SendingMessage::Published {
                                     publisher_ids: vec![track_id.clone()],
                                     player_id: player_id.clone(),
@@ -269,7 +315,7 @@ impl Handler<ReceivedMessage> for StreamingSession {
                             });
                         }
                         Err(err) => {
-                            tracing::error!("{}", err);
+                            tracing::error!("Failed to publish track: {}", err);
                         }
                     }
                 });
@@ -281,6 +327,10 @@ impl Handler<ReceivedMessage> for StreamingSession {
                 actix::spawn(async move {
                     if let Some(publisher) = publishers.lock().await.remove(&publisher_id) {
                         publisher.lock().await.close().await;
+
+                        // Unregister publisher from room
+                        room.unregister_publisher(&publisher_id);
+
                         // Notify all peers that this publisher is gone
                         room.get_peers(&player_id).iter().for_each(|peer| {
                             peer.do_send(SendingMessage::Unpublished {
