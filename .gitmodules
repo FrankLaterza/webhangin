@@ -1,0 +1,3 @@
+[submodule "backend/lib/rheomesh"]
+	path = backend/lib/rheomesh
+	url = https://github.com/h3poteto/rheomesh.git

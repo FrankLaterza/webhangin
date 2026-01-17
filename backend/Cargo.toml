@@ -12,7 +12,7 @@ tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = "0.4"
-rheomesh = { path = "../../rheomesh/sfu" }
+rheomesh = { path = "lib/rheomesh/sfu" }
 futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

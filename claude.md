@@ -44,7 +44,7 @@ WebHangin is a web-based real-time video streaming platform that allows users to
 - **Rust** - Systems programming language
 - **Actix-web 4.9** - Web framework with actor model
 - **Actix 0.13** - Actor framework
-- **Rheomesh 0.6.3** - WebRTC SFU library (local path: `../../rheomesh/sfu`)
+- **Rheomesh 0.6.3** - WebRTC SFU library (git submodule: `backend/lib/rheomesh/sfu`)
 - **WebRTC 0.14** - WebRTC implementation
 - **Tokio** - Async runtime
 - **Tracing** - Logging and observability
@@ -63,6 +63,9 @@ WebHangin is a web-based real-time video streaming platform that allows users to
 webhangin/
 ├── backend/
 │   ├── Cargo.toml
+│   ├── lib/
+│   │   └── rheomesh/            # Git submodule
+│   │       └── sfu/             # Rheomesh SFU library
 │   ├── src/
 │   │   ├── main.rs              # Actix-web server entry point
 │   │   └── streaming/
@@ -311,7 +314,8 @@ lsof -ti:3001 | xargs kill -9
 - Verify STUN server is reachable (`stun.l.google.com:19302`)
 
 ### Compilation Errors
-- Ensure Rheomesh path is correct: `path = "../../rheomesh/sfu"`
+- Ensure Rheomesh submodule is initialized: `git submodule update --init --recursive`
+- Path should be: `path = "lib/rheomesh/sfu"` in backend/Cargo.toml
 - Verify WebRTC version matches (0.14)
 - Check Rust toolchain is up to date
 
