@@ -133,15 +133,12 @@ function LocalPlayer({
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             keysPressed.current.add(e.key.toLowerCase());
-
-            // Spacebar triggers jump
-            if (e.key === ' ' && !currentAnimation.current) {
-                triggerAnimation('jump');
-                onAnimation('jump');
-            }
+            // Spacebar needs special handling since toLowerCase() doesn't change it
+            if (e.key === ' ') keysPressed.current.add(' ');
         };
         const handleKeyUp = (e: KeyboardEvent) => {
             keysPressed.current.delete(e.key.toLowerCase());
+            if (e.key === ' ') keysPressed.current.delete(' ');
         };
 
         window.addEventListener('keydown', handleKeyDown);
@@ -150,7 +147,7 @@ function LocalPlayer({
             window.removeEventListener('keydown', handleKeyDown);
             window.removeEventListener('keyup', handleKeyUp);
         };
-    }, [onAnimation, triggerAnimation, currentAnimation]);
+    }, []);
 
     useFrame((_, delta) => {
         if (!groupRef.current) return;
@@ -190,6 +187,12 @@ function LocalPlayer({
         // Clamp to room boundaries
         positionRef.current.x = Math.max(-10, Math.min(10, positionRef.current.x));
         positionRef.current.z = Math.max(-10, Math.min(10, positionRef.current.z));
+
+        // Continuous jump when spacebar is held
+        if (keysPressed.current.has(' ') && !currentAnimation.current) {
+            triggerAnimation('jump');
+            onAnimation('jump');
+        }
 
         // Update animation and get height offset
         const heightOffset = updateAnimation(delta);
@@ -302,6 +305,7 @@ export default function RoomPage() {
         };
 
         ws.onmessage = (event) => {
+            console.log('Received message:', event.data);
             const message = JSON.parse(event.data);
             handleMessage(message);
         };
@@ -462,7 +466,7 @@ export default function RoomPage() {
     const handlePlayerMove = (position: Position, rotation: number) => {
         // Throttle movement updates to ~20fps
         const now = Date.now();
-        if (now - moveThrottleRef.current < 50) return;
+        if (now - moveThrottleRef.current < 1) return;
         moveThrottleRef.current = now;
 
         wsRef.current?.send(JSON.stringify({ action: 'PlayerMove', position, rotation }));
