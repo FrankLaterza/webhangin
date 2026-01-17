@@ -181,19 +181,32 @@ function PlayerAvatar({ player, animation, isTalking, audioStream }: { player: P
     useEffect(() => {
         if (!audioStream || !groupRef.current) return;
 
+        console.log(`Setting up spatial audio for player ${player.id}`, audioStream.getTracks());
+
         // Get or create AudioListener on camera
         let listener = (camera as any).audioListener;
         if (!listener) {
             listener = new THREE.AudioListener();
             camera.add(listener);
             (camera as any).audioListener = listener;
+            console.log('Created AudioListener on camera');
         }
 
         // Create positional audio
         const positionalAudio = new THREE.PositionalAudio(listener);
-        const audioContext = listener.context;
-        const source = audioContext.createMediaStreamSource(audioStream);
-        positionalAudio.setNodeSource(source);
+
+        // Create media element to play the stream
+        const audioElement = document.createElement('audio');
+        audioElement.srcObject = audioStream;
+        audioElement.autoplay = true;
+        audioElement.play().then(() => {
+            console.log(`Audio element playing for player ${player.id}`);
+        }).catch((err) => {
+            console.error(`Failed to play audio for player ${player.id}:`, err);
+        });
+
+        // Set media element as source
+        positionalAudio.setMediaElementSource(audioElement);
 
         // Configure spatial audio settings
         positionalAudio.setRefDistance(3); // Distance where volume starts to decrease
@@ -205,13 +218,21 @@ function PlayerAvatar({ player, animation, isTalking, audioStream }: { player: P
         groupRef.current.add(positionalAudio);
         positionalAudioRef.current = positionalAudio;
 
-        console.log(`Spatial audio attached for player ${player.id}`);
+        console.log(`Spatial audio attached for player ${player.id}`, {
+            refDistance: 3,
+            maxDistance: 20,
+            rolloffFactor: 1.5
+        });
 
         return () => {
             if (positionalAudioRef.current) {
                 positionalAudioRef.current.disconnect();
                 groupRef.current?.remove(positionalAudioRef.current);
                 positionalAudioRef.current = null;
+            }
+            if (audioElement) {
+                audioElement.pause();
+                audioElement.srcObject = null;
             }
         };
     }, [audioStream, camera, player.id]);
