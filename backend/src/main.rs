@@ -124,11 +124,11 @@ async fn websocket_handler(
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // Initialize tracing
+    // Initialize tracing with reduced WebRTC verbosity
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,webhangin=debug".into()),
+                .unwrap_or_else(|_| "warn,backend=info,rheomesh=info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
