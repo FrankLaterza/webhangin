@@ -2,7 +2,7 @@
 
 ## Overview
 
-WebHangin is a **multiplayer 3D web game** where users create customizable avatars, join themed rooms based on their activity, and hang out together with real-time movement, chat, and screen sharing.
+WebHangin is a **multiplayer 3D web game** where users create customizable avatars, join themed rooms based on their activity, and hang out together with real-time movement, chat, screen sharing, and **voice chat with spatial audio**.
 
 ---
 
@@ -18,6 +18,9 @@ WebHangin is a **multiplayer 3D web game** where users create customizable avata
 │  - Cookie Persistence       │  - Player Avatars (local + remote)            │
 │  - Welcome Back Flow        │  - Chat Panel                                 │
 │                             │  - Screen Share                               │
+│                             │  - Voice Chat (Microphone)                    │
+│                             │  - Spatial Audio (Distance-based Volume)      │
+│                             │  - Talking Indicators (Animated Sprites)      │
 └──────────────────┬──────────┴───────────────────────────────────────────────┘
                    │ WebSocket (ws://localhost:3001/stream?name=...&shape=...&color=...&activity=...)
 ┌──────────────────▼──────────────────────────────────────────────────────────┐
@@ -27,7 +30,8 @@ WebHangin is a **multiplayer 3D web game** where users create customizable avata
 │  - HTTP/WS Server           │  - WebSocket Actor (StreamingSession)         │
 │  - Activity→Room Routing    │  - Player lifecycle (join/leave)              │
 │  - PlayerJoinQuery          │  - Message handlers                           │
-│                             │  - WebRTC signaling                           │
+│  - Static File Serving      │  - WebRTC signaling                           │
+│  - Frontend (from /out)     │  - Audio track publishing (with playerId)     │
 ├─────────────────────────────┼───────────────────────────────────────────────┤
 │  streaming/room.rs          │  External: rheomesh SFU                       │
 │  - Room<T> struct           │  - WebRTC publish/subscribe                   │
@@ -68,7 +72,7 @@ WebHangin is a **multiplayer 3D web game** where users create customizable avata
 | `Offer` | `sdp` | WebRTC SDP offer |
 | `PublisherIce` | `candidate` | ICE candidate |
 | `SubscriberIce` | `candidate` | ICE candidate |
-| `Published` | `publisherIds` | New streams available |
+| `Published` | `publisherIds`, `playerId` | New streams available (with owner ID) |
 | `Subscribed` | `subscriberId` | Subscription confirmed |
 | `Unpublished` | `publisherId` | Stream removed |
 | `ChatMessage` | `sender`, `message` | Broadcast chat |
@@ -170,19 +174,140 @@ RoomFloor()
 
 ---
 
+## Voice Chat & Spatial Audio
+
+### Microphone System
+
+**Activation:**
+- "Start Mic" button in sidebar
+- Captures audio via `getUserMedia({ audio: true })`
+- Publishes audio tracks via WebRTC
+- Mute/unmute without disconnecting
+
+**Talking Detection:**
+- Real-time audio level analysis using Web Audio API
+- `AnalyserNode` with frequency data
+- Threshold-based detection (configurable, default: 10)
+- 800ms delay after stopping to prevent flickering
+
+**Talking Indicators:**
+- Animated sprite sheet (2-frame loop at 0.4s intervals)
+- Shows in sidebar UI when talking
+- Displays above player avatars in 3D world
+- Only visible when audio exceeds threshold and mic is unmuted
+
+### Spatial Audio (`SpatialAudio.tsx`)
+
+**Current Implementation (Distance-based Volume):**
+- Manual distance calculation between camera and player
+- Linear volume falloff: `volume = 1 - (distance / soundRadius)`
+- Default sound radius: 20 units
+- Updates every frame (60fps)
+
+**Volume Formula:**
+```typescript
+distance = camera.position.distanceTo(playerPosition)
+if (distance <= soundRadius) {
+    volume = 1 - (distance / soundRadius)
+} else {
+    volume = 0
+}
+```
+
+**Debug Logging (every 5 seconds):**
+- Distance in units
+- Calculated volume percentage
+- Direction (LEFT/RIGHT/FRONT/BEHIND)
+- Angle from camera
+- Player and camera positions
+- Audio element state (playing/paused/muted)
+
+**Known Limitations:**
+- No stereo panning (left/right ear positioning)
+- HTML audio `volume` property may not affect MediaStreams
+- Consider switching to Web Audio API's PannerNode for true spatial audio
+
+**Audio Stream Mapping:**
+- Backend sends `playerId` with `Published` message
+- Frontend maps `publisherId` → `playerId`
+- Enables per-player audio tracking and volume control
+
+---
+
+## Single-Port Deployment
+
+### Architecture
+
+Backend (Rust/Actix) serves **both** API and static frontend:
+- **Port 3001**: HTTP, WebSocket, and static files
+- Frontend built to `frontend/out/` via `npm run build`
+- Backend serves from `../frontend/out` using `actix-files`
+
+### Benefits
+
+- **ngrok compatibility**: Only one port to expose
+- **Simplified deployment**: Single process serves everything
+- **Dynamic WebSocket URLs**: Frontend detects `window.location.host`
+
+### WebSocket Connection
+
+```typescript
+// Automatically uses current host (works with ngrok)
+const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+const host = window.location.host;
+const wsUrl = `${protocol}//${host}/stream?${params}`;
+```
+
+---
+
 ## Running the Project
 
+### Quick Start (Recommended)
+
 ```bash
-# Backend
+# Root directory - builds frontend and starts backend
+./run.sh       # macOS/Linux
+run.bat        # Windows
+```
+
+### Manual Steps
+
+```bash
+# 1. Build frontend (static export to /out)
+cd frontend
+npm run build
+
+# 2. Start backend (serves both API and frontend)
 cd backend
 cargo run
 # → http://0.0.0.0:3001
-
-# Frontend
-cd frontend
-npm run dev
-# → http://localhost:3000
 ```
+
+### With ngrok (for external access)
+
+```bash
+# Terminal 1: Start backend (after building frontend)
+cd backend
+cargo run
+
+# Terminal 2: Expose with ngrok
+ngrok http 3001
+# Share the ngrok URL - works for both frontend and WebSocket!
+```
+
+---
+
+## Build Scripts
+
+| File | Platform | Purpose |
+|------|----------|---------|
+| `run.sh` | macOS/Linux | Build frontend + start backend |
+| `run.bat` | Windows | Build frontend + start backend |
+
+Both scripts:
+1. Navigate to `frontend/` and run `npm run build`
+2. Check for build errors
+3. Navigate to `backend/` and run `cargo run`
 
 ---
 
@@ -200,7 +325,10 @@ npm run dev
 | File | Purpose |
 |------|---------|
 | `app/page.tsx` | Character creator, cookie persistence |
-| `app/room/page.tsx` | 3D scene, controls, chat, streaming |
+| `app/room/page.tsx` | 3D scene, controls, chat, streaming, mic controls |
+| `app/room/SpatialAudio.tsx` | Distance-based volume control for voice chat |
+| `next.config.ts` | Static export configuration (`output: 'export'`) |
+| `public/assets/textures/` | Sprite sheets (talking indicator, etc.) |
 
 ---
 
@@ -211,19 +339,53 @@ npm run dev
 | Player identity confusion | Assumed last player in list was "us" | Added `yourPlayerId` to `RoomState` |
 | Double jump animation | Progress decreased after reaching 1 | One-shot: reset to 0 instead of decrease |
 | Name tags rotating | Text rotated with player group | Wrapped in `<Billboard>` component |
-| Cargo not found | Windows path issue | Use `alias cargo="/c/Users/willc/.cargo/bin/cargo.exe"` |
+| Audio sources not removing | Publisher IDs not tracked/unpublished | Added `audioPublisherIdsRef` and `StopPublish` messages |
+| Spatial audio not working | HTML audio `volume` may not work with MediaStreams | Consider Web Audio API's GainNode/PannerNode |
+| Port already in use | Backend still running from previous session | `lsof -ti:3001 \| xargs kill -9` |
+| Sprite sheet 404 error | Assets in `/assets/` instead of `/public/` | Copy to `/public/assets/` for Next.js static serving |
+| ngrok WebSocket fails | Hardcoded `localhost` URL | Use dynamic `window.location.host` |
 
 ---
 
 ## Future Enhancements
 
+### Audio Improvements
+- [ ] True spatial audio with Web Audio API PannerNode
+- [ ] Stereo panning (left/right positioning based on player location)
+- [ ] Audio gain control with GainNode (for reliable volume control)
+- [ ] Voice activity detection improvements
+- [ ] Push-to-talk option
+
+### Visual Features
 - [ ] Chat bubbles above avatars in 3D
 - [ ] More animations (wave, dance)
 - [ ] Screen share "hologram" in front of player
 - [ ] Player activity labels visible in 3D
+- [ ] Audio visualization (sound waves around talking players)
+
+### Backend
 - [ ] Persistent user accounts
 - [ ] Backend-driven animations
+- [ ] Room capacity limits
+- [ ] Admin controls
+
+### Other
 - [ ] Speech-to-text / text-to-speech
+- [ ] Mobile support
+- [ ] VR support
+
+---
+
+## Completed Features
+
+- [x] Voice chat with microphone capture
+- [x] Talking detection with audio analysis
+- [x] Animated talking indicators (sprite sheet)
+- [x] Distance-based volume control
+- [x] Single-port deployment (ngrok compatible)
+- [x] Dynamic WebSocket URLs
+- [x] Audio stream cleanup on disconnect
+- [x] Per-player audio tracking
 
 ---
 
