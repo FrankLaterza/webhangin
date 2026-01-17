@@ -3,6 +3,9 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Canvas } from '@react-three/fiber';
+import { useGLTF } from '@react-three/drei';
+import { useMemo } from 'react';
+import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 
 // Cookie helpers
 function getCookie(name: string): string | null {
@@ -18,19 +21,27 @@ function setCookie(name: string, value: string, days: number = 365) {
 
 interface PlayerData {
   name: string;
-  shape: 'circle' | 'square';
+  shape: 'circle' | 'square' | 'cat';
   color: string;
   activity: string;
 }
 
 // 3D Preview of player shape
-function ShapePreview({ shape, color }: { shape: 'circle' | 'square'; color: string }) {
+// 3D Preview of player shape
+function ShapePreview({ shape, color }: { shape: 'circle' | 'square' | 'cat'; color: string }) {
+  const { scene } = useGLTF('/assets/models/TWISTED_cat_character.glb');
+
+  // Clone scene for preview using SkeletonUtils
+  const clone = useMemo(() => SkeletonUtils.clone(scene), [scene]);
+
   return (
     <mesh rotation={[0.5, 0.5, 0]}>
       {shape === 'circle' ? (
         <sphereGeometry args={[1, 32, 32]} />
-      ) : (
+      ) : shape === 'square' ? (
         <boxGeometry args={[1.5, 1.5, 1.5]} />
+      ) : (
+        <primitive object={clone} scale={0.5} position={[0, -0.5, 0]} />
       )}
       <meshStandardMaterial color={color} />
     </mesh>
@@ -128,8 +139,8 @@ export default function Home() {
               <button
                 onClick={() => setPlayerData({ ...playerData, shape: 'circle' })}
                 className={`flex-1 py-3 rounded-lg border transition ${playerData.shape === 'circle'
-                    ? 'bg-orange-500 border-orange-500 text-white'
-                    : 'bg-black/30 border-white/20 hover:border-white/40'
+                  ? 'bg-orange-500 border-orange-500 text-white'
+                  : 'bg-black/30 border-white/20 hover:border-white/40'
                   }`}
               >
                 ⚪ Circle
@@ -137,11 +148,20 @@ export default function Home() {
               <button
                 onClick={() => setPlayerData({ ...playerData, shape: 'square' })}
                 className={`flex-1 py-3 rounded-lg border transition ${playerData.shape === 'square'
-                    ? 'bg-orange-500 border-orange-500 text-white'
-                    : 'bg-black/30 border-white/20 hover:border-white/40'
+                  ? 'bg-orange-500 border-orange-500 text-white'
+                  : 'bg-black/30 border-white/20 hover:border-white/40'
                   }`}
               >
                 ⬜ Square
+              </button>
+              <button
+                onClick={() => setPlayerData({ ...playerData, shape: 'cat' })}
+                className={`flex-1 py-3 rounded-lg border transition ${playerData.shape === 'cat'
+                  ? 'bg-orange-500 border-orange-500 text-white'
+                  : 'bg-black/30 border-white/20 hover:border-white/40'
+                  }`}
+              >
+                🐱 Cat
               </button>
             </div>
           </div>
@@ -187,3 +207,6 @@ export default function Home() {
     </div>
   );
 }
+
+// Preload the cat model so it's ready immediately
+useGLTF.preload('/assets/models/TWISTED_cat_character.glb');
