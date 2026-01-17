@@ -15,12 +15,18 @@ interface Position {
     z: number;
 }
 
+interface FacialFeatures {
+    eyeStyle: string;
+    noseStyle: string;
+    mouthStyle: string;
+}
+
 interface PlayerData {
     id: string;
     name: string;
-    shape: string;
     color: string;
     activity: string;
+    facialFeatures: FacialFeatures;
     position: Position;
     rotation: number;
     isMoving: boolean;
@@ -134,11 +140,88 @@ function useCharacterAnimations(
 }
 
 // Cat Avatar Component
-function CatAvatar({ animation, isMoving, playerName }: { animation: AnimationType; isMoving: boolean; playerName: string }) {
+function CatAvatar({
+    facialFeatures,
+    color,
+    animation,
+    isMoving,
+    playerName
+}: {
+    facialFeatures: FacialFeatures;
+    color: string;
+    animation: AnimationType;
+    isMoving: boolean;
+    playerName: string;
+}) {
     const { scene, animations } = useGLTF('/assets/models/TWISTED_cat_character.glb');
     // Clone scene using SkeletonUtils to properly handle SkinnedMeshes (animations)
     const clone = useMemo(() => SkeletonUtils.clone(scene), [scene]);
     const { actions, mixer } = useAnimations(animations, clone);
+
+    // Load facial textures
+    const eyeTexture = useTexture(
+        `/assets/textures/character_facial_textures/eyes/eyes_${facialFeatures.eyeStyle}.png`
+    );
+    const noseTexture = useTexture(
+        `/assets/textures/character_facial_textures/nose/nose_${facialFeatures.noseStyle}.png`
+    );
+    const mouthTexture = useTexture(
+        `/assets/textures/character_facial_textures/mouth/mouth_${facialFeatures.mouthStyle}.png`
+    );
+
+    // GLB models from Blender typically need flipY = false
+    eyeTexture.flipY = false;
+    noseTexture.flipY = false;
+    mouthTexture.flipY = false;
+
+    // Apply textures and colors to named meshes
+    useEffect(() => {
+        console.log('Traversing clone for facial meshes...');
+        clone.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+                console.log('Found mesh:', child.name, 'Material type:', child.material.constructor.name);
+                switch (child.name) {
+                    case 'twisted_cat':
+                        // Apply fur color to body mesh
+                        if (child.material instanceof THREE.MeshStandardMaterial) {
+                            child.material.color.set(color);
+                            child.material.needsUpdate = true;
+                        }
+                        break;
+                    case 'twisted_cat_eyes_mesh':
+                        console.log('Applying eye texture to:', child.name);
+                        if (child.material instanceof THREE.MeshStandardMaterial) {
+                            child.material.map = eyeTexture;
+                            child.material.transparent = true;
+                            child.material.alphaTest = 0.1;
+                            child.material.color.set(0xffffff);
+                            child.material.needsUpdate = true;
+                        }
+                        break;
+                    case 'twisted_cat_nose_mesh':
+                        console.log('Applying nose texture to:', child.name);
+                        if (child.material instanceof THREE.MeshStandardMaterial) {
+                            child.material.map = noseTexture;
+                            child.material.transparent = true;
+                            child.material.alphaTest = 0.1;
+                            child.material.color.set(0xffffff);
+                            child.material.needsUpdate = true;
+                        }
+                        break;
+                    case 'twisted_cat_mouth_mesh':
+                        console.log('Applying mouth texture to:', child.name);
+                        if (child.material instanceof THREE.MeshStandardMaterial) {
+                            child.material.map = mouthTexture;
+                            child.material.transparent = true;
+                            child.material.alphaTest = 0.1;
+                            child.material.color.set(0xffffff);
+                            child.material.needsUpdate = true;
+                        }
+                        break;
+                }
+            }
+        });
+    }, [clone, color, eyeTexture, noseTexture, mouthTexture]);
 
     // Use centralized animation logic
     useCharacterAnimations(actions, mixer, animation, isMoving, playerName);
@@ -146,22 +229,28 @@ function CatAvatar({ animation, isMoving, playerName }: { animation: AnimationTy
     return <primitive object={clone} scale={0.5} position={[0, -0.5, 0]} />;
 }
 
-// Unified Avatar Mesh Component
-// Unified Avatar Mesh Component
-function AvatarMesh({ shape, color, animation, isMoving, playerName }: { shape: string; color: string; animation: AnimationType; isMoving: boolean; playerName: string }) {
-    if (shape === 'cat') {
-        return <CatAvatar animation={animation} isMoving={isMoving} playerName={playerName} />;
-    }
-
+// Unified Avatar Mesh Component (cat-only for now)
+function AvatarMesh({
+    facialFeatures,
+    color,
+    animation,
+    isMoving,
+    playerName
+}: {
+    facialFeatures: FacialFeatures;
+    color: string;
+    animation: AnimationType;
+    isMoving: boolean;
+    playerName: string;
+}) {
     return (
-        <mesh>
-            {shape === 'circle' ? (
-                <sphereGeometry args={[0.5, 32, 32]} />
-            ) : (
-                <boxGeometry args={[0.8, 0.8, 0.8]} />
-            )}
-            <meshStandardMaterial color={color} />
-        </mesh>
+        <CatAvatar
+            facialFeatures={facialFeatures}
+            color={color}
+            animation={animation}
+            isMoving={isMoving}
+            playerName={playerName}
+        />
     );
 }
 
@@ -212,8 +301,14 @@ function PlayerAvatar({ player, animation, isTalking, audioStream }: { player: P
 
     return (
         <group ref={groupRef} position={[player.position.x, player.position.y, player.position.z]}>
-            {/* Mesh handles shape rendering */}
-            <AvatarMesh shape={player.shape} color={player.color} animation={animation} isMoving={isMoving} playerName={player.name} />
+            {/* Mesh handles avatar rendering */}
+            <AvatarMesh
+                facialFeatures={player.facialFeatures}
+                color={player.color}
+                animation={animation}
+                isMoving={isMoving}
+                playerName={player.name}
+            />
 
             {/* Talking indicator */}
             {isTalking && (
@@ -425,6 +520,7 @@ function LocalPlayer({
 
     return (
         <group ref={groupRef} position={[player.position.x, player.position.y, player.position.z]}>
+<<<<<<< Updated upstream
             <AvatarMesh shape={player.shape} color={player.color} animation={activeAnimation} isMoving={isMoving} playerName={player.name} />
 
             {/* Talking indicator */}
@@ -441,6 +537,15 @@ function LocalPlayer({
                 </Billboard>
             )}
 
+=======
+            <AvatarMesh
+                facialFeatures={player.facialFeatures}
+                color={player.color}
+                animation={activeAnimation}
+                isMoving={isMoving}
+                playerName={player.name}
+            />
+>>>>>>> Stashed changes
             <Billboard position={[0, 1, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
                 <Text
                     fontSize={0.3}
@@ -589,10 +694,13 @@ function RoomPage() {
     useEffect(() => {
         // Connect with player data from query params
         const name = searchParams.get('name') || 'Anonymous';
-        const shape = searchParams.get('shape') || 'circle';
         const color = searchParams.get('color') || '#ff9500';
         const activity = searchParams.get('activity') || 'hanging out';
+        const eyeStyle = searchParams.get('eyeStyle') || 'dreary';
+        const noseStyle = searchParams.get('noseStyle') || 'kitty_opt';
+        const mouthStyle = searchParams.get('mouthStyle') || 'meow';
 
+<<<<<<< Updated upstream
         const params = new URLSearchParams({ name, shape, color, activity });
 
         // Use current hostname for WebSocket connection (works with ngrok)
@@ -602,6 +710,17 @@ function RoomPage() {
 
         console.log('Connecting to WebSocket:', wsUrl);
         const ws = new WebSocket(wsUrl);
+=======
+        const params = new URLSearchParams({
+            name,
+            color,
+            activity,
+            eyeStyle,
+            noseStyle,
+            mouthStyle,
+        });
+        const ws = new WebSocket(`ws://localhost:3001/stream?${params.toString()}`);
+>>>>>>> Stashed changes
         wsRef.current = ws;
 
         ws.onopen = () => {

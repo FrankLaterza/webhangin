@@ -14,15 +14,18 @@ use webrtc::api::media_engine;
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters};
 use webrtc::rtp_transceiver::RTCPFeedback;
 
-use streaming::{RoomOwner, StreamingSession, PlayerData};
+use streaming::{RoomOwner, StreamingSession, PlayerData, FacialFeatures};
 
 /// Query parameters for joining a room
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PlayerJoinQuery {
     name: String,
-    shape: String,
     color: String,
     activity: String,
+    eye_style: String,
+    nose_style: String,
+    mouth_style: String,
 }
 
 /// Map activity to themed room
@@ -75,9 +78,13 @@ async fn websocket_handler(
     let player_data = PlayerData {
         id: String::new(), // Will be set by Room::add_player
         name: query.name.clone(),
-        shape: query.shape.clone(),
         color: query.color.clone(),
         activity: query.activity.clone(),
+        facial_features: FacialFeatures {
+            eye_style: query.eye_style.clone(),
+            nose_style: query.nose_style.clone(),
+            mouth_style: query.mouth_style.clone(),
+        },
         position: Default::default(),
         rotation: 0.0,
         is_moving: false,

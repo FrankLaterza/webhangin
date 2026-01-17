@@ -21,15 +21,24 @@ pub struct Position {
     pub z: f32,
 }
 
+/// Facial feature customization options
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FacialFeatures {
+    pub eye_style: String,
+    pub nose_style: String,
+    pub mouth_style: String,
+}
+
 /// Player data for game state
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerData {
     pub id: String,
     pub name: String,
-    pub shape: String,
     pub color: String,
     pub activity: String,
+    pub facial_features: FacialFeatures,
     pub position: Position,
     pub rotation: f32,
     pub is_moving: bool,
