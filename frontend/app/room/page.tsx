@@ -7,6 +7,7 @@ import { Text, Billboard, useTexture, useGLTF, useAnimations } from '@react-thre
 import { PublishTransport, SubscribeTransport } from 'rheomesh';
 import * as THREE from 'three';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+import { SpatialAudio } from './SpatialAudio';
 
 interface Position {
     x: number;
@@ -165,8 +166,6 @@ function PlayerAvatar({ player, animation, isTalking, audioStream }: { player: P
     const groupRef = useRef<THREE.Group>(null);
     const { triggerAnimation, updateAnimation } = usePlayerAnimation();
     const micTexture = useTexture('/assets/textures/mic-talking-indicator_sprite_sheet.png');
-    const { camera } = useThree();
-    const positionalAudioRef = useRef<THREE.PositionalAudio | null>(null);
 
     // Configure sprite sheet texture
     useEffect(() => {
@@ -176,66 +175,6 @@ function PlayerAvatar({ player, animation, isTalking, audioStream }: { player: P
             micTexture.offset.set(0, 0);
         }
     }, [micTexture]);
-
-    // Set up spatial audio
-    useEffect(() => {
-        if (!audioStream || !groupRef.current) return;
-
-        console.log(`Setting up spatial audio for player ${player.id}`, audioStream.getTracks());
-
-        // Get or create AudioListener on camera
-        let listener = (camera as any).audioListener;
-        if (!listener) {
-            listener = new THREE.AudioListener();
-            camera.add(listener);
-            (camera as any).audioListener = listener;
-            console.log('Created AudioListener on camera');
-        }
-
-        // Create positional audio
-        const positionalAudio = new THREE.PositionalAudio(listener);
-
-        // Create media element to play the stream
-        const audioElement = document.createElement('audio');
-        audioElement.srcObject = audioStream;
-        audioElement.autoplay = true;
-        audioElement.play().then(() => {
-            console.log(`Audio element playing for player ${player.id}`);
-        }).catch((err) => {
-            console.error(`Failed to play audio for player ${player.id}:`, err);
-        });
-
-        // Set media element as source
-        positionalAudio.setMediaElementSource(audioElement);
-
-        // Configure spatial audio settings
-        positionalAudio.setRefDistance(3); // Distance where volume starts to decrease
-        positionalAudio.setMaxDistance(20); // Maximum distance for audio
-        positionalAudio.setRolloffFactor(1.5); // How quickly volume decreases
-        positionalAudio.setDistanceModel('linear'); // Linear falloff
-
-        // Attach to player position
-        groupRef.current.add(positionalAudio);
-        positionalAudioRef.current = positionalAudio;
-
-        console.log(`Spatial audio attached for player ${player.id}`, {
-            refDistance: 3,
-            maxDistance: 20,
-            rolloffFactor: 1.5
-        });
-
-        return () => {
-            if (positionalAudioRef.current) {
-                positionalAudioRef.current.disconnect();
-                groupRef.current?.remove(positionalAudioRef.current);
-                positionalAudioRef.current = null;
-            }
-            if (audioElement) {
-                audioElement.pause();
-                audioElement.srcObject = null;
-            }
-        };
-    }, [audioStream, camera, player.id]);
 
     // Trigger animation when prop changes
     useEffect(() => {
@@ -296,6 +235,16 @@ function PlayerAvatar({ player, animation, isTalking, audioStream }: { player: P
                     {player.name}
                 </Text>
             </Billboard>
+
+            {/* Spatial audio */}
+            {audioStream && groupRef.current && (
+                <SpatialAudio
+                    audioStream={audioStream}
+                    targetPosition={groupRef.current.position}
+                    playerId={player.id}
+                    soundRadius={20}
+                />
+            )}
         </group>
     );
 }
