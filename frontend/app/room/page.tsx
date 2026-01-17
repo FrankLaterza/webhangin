@@ -616,7 +616,14 @@ function RoomPage() {
         const activity = searchParams.get('activity') || 'hanging out';
 
         const params = new URLSearchParams({ name, shape, color, activity });
-        const ws = new WebSocket(`ws://localhost:3001/stream?${params.toString()}`);
+
+        // Use current hostname for WebSocket connection (works with ngrok)
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const host = window.location.host; // includes port if present
+        const wsUrl = `${protocol}//${host}/stream?${params.toString()}`;
+
+        console.log('Connecting to WebSocket:', wsUrl);
+        const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
         ws.onopen = () => {
