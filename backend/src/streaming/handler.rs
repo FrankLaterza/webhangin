@@ -197,7 +197,8 @@ impl Handler<ReceivedMessage> for StreamingSession {
                     let router = room.router.lock().await;
                     let ids = router.publisher_ids();
                     tracing::info!("router publisher ids {:#?}", ids);
-                    address.do_send(SendingMessage::Published { publisher_ids: ids });
+                    // Send empty player_id for initial state since these are from all players
+                    address.do_send(SendingMessage::Published { publisher_ids: ids, player_id: String::new() });
                 });
             }
             ReceivedMessage::PublisherIce { candidate } => {
@@ -262,6 +263,7 @@ impl Handler<ReceivedMessage> for StreamingSession {
                             room.get_peers(&player_id).iter().for_each(|peer| {
                                 peer.do_send(SendingMessage::Published {
                                     publisher_ids: vec![track_id.clone()],
+                                    player_id: player_id.clone(),
                                 });
                             });
                         }
@@ -398,7 +400,7 @@ enum SendingMessage {
     #[serde(rename_all = "camelCase")]
     SubscriberIce { candidate: RTCIceCandidateInit },
     #[serde(rename_all = "camelCase")]
-    Published { publisher_ids: Vec<String> },
+    Published { publisher_ids: Vec<String>, player_id: String },
     #[serde(rename_all = "camelCase")]
     Subscribed { subscriber_id: String },
     #[serde(rename_all = "camelCase")]
