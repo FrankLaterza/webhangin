@@ -4,6 +4,7 @@ use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, Responder};
 use actix_web::web::{Data, Query};
 use actix_web_actors::ws;
 use actix_cors::Cors;
+use actix_files as fs;
 use rheomesh::config::{CodecConfig, MediaConfig};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -133,7 +134,9 @@ async fn main() -> std::io::Result<()> {
     let room_data = Data::new(Mutex::new(room_owner));
 
     println!("🚀 WebHangin server starting on http://0.0.0.0:3001");
-    println!("📡 WebSocket streaming available at ws://0.0.0.0:3001/stream?room=<room_id>");
+    println!("📡 WebSocket: ws://0.0.0.0:3001/stream");
+    println!("🌐 Frontend: http://0.0.0.0:3001/");
+    println!("💡 Run 'npm run build' in frontend/ to update the static files");
 
     HttpServer::new(move || {
         let cors = Cors::default()
@@ -144,9 +147,15 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .wrap(TracingLogger::default())
             .wrap(cors)
-            .service(index)
+            // API routes first (these take precedence over static files)
             .route("/api/click", web::post().to(handle_click))
             .route("/stream", web::get().to(websocket_handler))
+            // Serve Next.js static export from frontend/out
+            .service(
+                fs::Files::new("/", "../frontend/out")
+                    .index_file("index.html")
+                    .use_last_modified(true)
+            )
             .app_data(room_data.clone())
     })
     .bind("0.0.0.0:3001")?
