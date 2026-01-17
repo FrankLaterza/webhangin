@@ -1,7 +1,6 @@
 mod streaming;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, Responder};
 use actix_web::web::{Data, Query};
 use actix_web_actors::ws;
@@ -25,11 +24,6 @@ struct ClickRequest {
 #[derive(Serialize)]
 struct ClickResponse {
     response: String,
-}
-
-#[derive(Deserialize)]
-struct StreamQuery {
-    room: String,
 }
 
 #[actix_web::get("/")]
