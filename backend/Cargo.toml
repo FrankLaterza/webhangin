@@ -4,9 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-axum = "0.8.8"
+actix = "0.13"
+actix-web = "4.9"
+actix-web-actors = "4.3"
+actix-cors = "0.7"
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
-tower-http = { version = "0.6.2", features = ["cors"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = "0.4"
+rheomesh = { path = "../../rheomesh/sfu" }
+futures-util = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-actix-web = "0.7"
+webrtc = "0.14"

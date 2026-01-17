@@ -51,7 +51,24 @@ function Donut() {
 
 export default function Home() {
   return (
-    <div style={{ width: '100vw', height: '100vh', background: '#1a1a1a' }}>
+    <div style={{ width: '100vw', height: '100vh', background: '#1a1a1a', position: 'relative' }}>
+      <div style={{ position: 'absolute', top: '20px', left: '20px', zIndex: 10 }}>
+        <a
+          href="/stream"
+          style={{
+            padding: '12px 24px',
+            background: '#ff9500',
+            color: 'white',
+            textDecoration: 'none',
+            borderRadius: '8px',
+            fontWeight: 'bold',
+            fontSize: '16px',
+            boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)'
+          }}
+        >
+          🎥 Go to Stream Room
+        </a>
+      </div>
       <Canvas camera={{ position: [0, 0, 5] }}>
         <ambientLight intensity={0.5} />
         <pointLight position={[10, 10, 10]} intensity={1} />
