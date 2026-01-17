@@ -22,6 +22,7 @@ interface PlayerData {
     activity: string;
     position: Position;
     rotation: number;
+    isMoving: boolean;
 }
 
 interface RemoteStream {
@@ -61,61 +62,88 @@ function usePlayerAnimation() {
     };
 
     return { triggerAnimation, updateAnimation, currentAnimation, animationProgress };
+
+}
+
+// Hook to manage character animations state machine
+function useCharacterAnimations(
+    actions: any,
+    animation: AnimationType,
+    isMoving: boolean,
+    playerName: string
+) {
+    const currentAction = useRef<THREE.AnimationAction | null>(null);
+
+    useEffect(() => {
+        console.log(`DEBUG [${playerName}]: State:`, { animation, isMoving });
+
+        const fadeTime = 0.2;
+        let nextAction: THREE.AnimationAction | null = null;
+        let nextFadeTime = fadeTime;
+
+        // 1. Determine target action based on state priority
+        // Priority: Jump (One-shot) > Move (Loop) > Idle (Loop)
+
+        if (animation === 'jump') {
+            console.log('🐈 Animation: JUMP');
+            // Stop everything for T-pose effect as requested, or play jump anim if we had one
+            // User requested T-pose/Stop for jump
+            if (currentAction.current) {
+                currentAction.current.fadeOut(0.05); // Faster fade out for jump
+                currentAction.current = null;
+            }
+            return;
+        }
+
+        if (isMoving) {
+            nextAction = actions['WalkingAnimation'] || actions['WalkingStash'] || actions['Walk'];
+            nextFadeTime = 0.1;
+        } else {
+            nextAction = actions['IdleAnimation'] || actions['IdleStash'] || actions['Idle'];
+            // If we are coming from "nothing" (Jump/Spawn), fade is faster (0.3s)
+            // If we are coming from Walk, fade is .6s
+            nextFadeTime = currentAction.current ? 0.6 : 0.3;
+        }
+
+        // 2. Transition
+        if (nextAction !== currentAction.current) {
+            // Fade out current
+            if (currentAction.current) {
+                currentAction.current.fadeOut(nextFadeTime);
+            }
+
+            // Fade in next
+            if (nextAction) {
+                nextAction.reset().fadeIn(nextFadeTime).play();
+
+                // Logging
+                if (isMoving) console.log('🐈 Animation: WALK');
+                else console.log('🐈 Animation: IDLE');
+            }
+
+            currentAction.current = nextAction;
+        }
+    }, [actions, animation, isMoving]);
 }
 
 // Cat Avatar Component
-// Cat Avatar Component
-function CatAvatar({ animation, isMoving }: { animation: AnimationType; isMoving: boolean }) {
+function CatAvatar({ animation, isMoving, playerName }: { animation: AnimationType; isMoving: boolean; playerName: string }) {
     const { scene, animations } = useGLTF('/assets/models/TWISTED_cat_character.glb');
     // Clone scene using SkeletonUtils to properly handle SkinnedMeshes (animations)
     const clone = useMemo(() => SkeletonUtils.clone(scene), [scene]);
     const { actions } = useAnimations(animations, clone);
 
-    useEffect(() => {
-        // Log available animations once
-        // console.log('Available animations:', Object.keys(actions));
-    }, [actions]);
-
-    useEffect(() => {
-        // Handle Jump (T-pose / Stop)
-        if (animation === 'jump') {
-            console.log('🐈 Animation: JUMP (Stop/T-pose)');
-            Object.values(actions).forEach(action => action?.fadeOut(0.1));
-            return;
-        }
-
-        // Handle Walking
-        if (isMoving) {
-            const walkAction = actions['Walk'];
-            // If walk is already playing, don't restart it
-            if (walkAction && !walkAction.isRunning()) {
-                console.log('🐈 Animation: WALK (Fade 0.1s)');
-                // Fade out others
-                Object.values(actions).forEach(a => a !== walkAction && a?.fadeOut(0.1));
-                walkAction.reset().fadeIn(0.1).play();
-            }
-            return;
-        }
-
-        // Handle Idle
-        const idleAction = actions['Idle'];
-        if (idleAction && !idleAction.isRunning()) {
-            console.log('🐈 Animation: IDLE (Fade 1.0s)');
-            // Fade out others
-            Object.values(actions).forEach(a => a !== idleAction && a?.fadeOut(1.0));
-            idleAction.reset().fadeIn(1.0).play();
-        }
-
-    }, [animation, isMoving, actions]);
+    // Use centralized animation logic
+    useCharacterAnimations(actions, animation, isMoving, playerName);
 
     return <primitive object={clone} scale={0.5} position={[0, -0.5, 0]} />;
 }
 
 // Unified Avatar Mesh Component
 // Unified Avatar Mesh Component
-function AvatarMesh({ shape, color, animation, isMoving }: { shape: string; color: string; animation: AnimationType; isMoving: boolean }) {
+function AvatarMesh({ shape, color, animation, isMoving, playerName }: { shape: string; color: string; animation: AnimationType; isMoving: boolean; playerName: string }) {
     if (shape === 'cat') {
-        return <CatAvatar animation={animation} isMoving={isMoving} />;
+        return <CatAvatar animation={animation} isMoving={isMoving} playerName={playerName} />;
     }
 
     return (
@@ -142,10 +170,10 @@ function PlayerAvatar({ player, animation }: { player: PlayerData; animation: An
         }
     }, [animation, triggerAnimation]);
 
-    // Track movement for animation
-    const [isMoving, setIsMoving] = useState(false);
-    const isMovingRef = useRef(false);
+    // Use explicit isMoving state from player data
+    const isMoving = player.isMoving;
 
+    // Movement interpolation
     useFrame((_, delta) => {
         if (!groupRef.current) return;
 
@@ -155,15 +183,6 @@ function PlayerAvatar({ player, animation }: { player: PlayerData; animation: An
         groupRef.current.position.lerp(targetPos, 0.1);
         groupRef.current.rotation.y = player.rotation;
 
-        // Determine if moving based on distance to target
-        const dist = groupRef.current.position.distanceTo(targetPos);
-        const moving = dist > 0.1;
-
-        if (moving !== isMovingRef.current) {
-            isMovingRef.current = moving;
-            setIsMoving(moving);
-        }
-
         // Apply animation offset
         const heightOffset = updateAnimation(delta);
         groupRef.current.position.y = player.position.y + heightOffset;
@@ -172,7 +191,7 @@ function PlayerAvatar({ player, animation }: { player: PlayerData; animation: An
     return (
         <group ref={groupRef} position={[player.position.x, player.position.y, player.position.z]}>
             {/* Mesh handles shape rendering */}
-            <AvatarMesh shape={player.shape} color={player.color} animation={animation} isMoving={isMoving} />
+            <AvatarMesh shape={player.shape} color={player.color} animation={animation} isMoving={isMoving} playerName={player.name} />
 
             <Billboard position={[0, 1, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
                 <Text
@@ -195,7 +214,7 @@ function LocalPlayer({
     onAnimation
 }: {
     player: PlayerData;
-    onMove: (position: Position, rotation: number) => void;
+    onMove: (position: Position, rotation: number, isMoving: boolean) => void;
     onAnimation: (animation: AnimationType) => void;
 }) {
     const groupRef = useRef<THREE.Group>(null);
@@ -227,6 +246,10 @@ function LocalPlayer({
     // Track movement state
     const [isMoving, setIsMoving] = useState(false);
     const isMovingRef = useRef(false);
+    const wasMovingRef = useRef(false);
+
+    // Track active animation state for rendering
+    const [activeAnimation, setActiveAnimation] = useState<AnimationType>(null);
 
     useFrame((_, delta) => {
         if (!groupRef.current) return;
@@ -282,6 +305,12 @@ function LocalPlayer({
         // Update animation and get height offset
         const heightOffset = updateAnimation(delta);
 
+        // Sync active animation state if changed (e.g. jump finished)
+        if (currentAnimation.current !== activeAnimation) {
+            setActiveAnimation(currentAnimation.current);
+            onAnimation(currentAnimation.current);
+        }
+
         // Apply to group (which contains mesh and text)
         groupRef.current.position.set(
             positionRef.current.x,
@@ -298,15 +327,17 @@ function LocalPlayer({
         );
         camera.lookAt(positionRef.current.x, positionRef.current.y + 0.5 + heightOffset, positionRef.current.z);
 
-        // Send position update
-        if (moved) {
-            onMove({ ...positionRef.current }, rotationRef.current);
+        // Send position update if moved OR if moving state changed (e.g. stopped)
+        // We track previous moving state to ensure we send the "stop" event
+        if (moved || isMovingRef.current !== wasMovingRef.current) {
+            onMove({ ...positionRef.current }, rotationRef.current, isMovingRef.current);
+            wasMovingRef.current = isMovingRef.current;
         }
     });
 
     return (
         <group ref={groupRef} position={[player.position.x, player.position.y, player.position.z]}>
-            <AvatarMesh shape={player.shape} color={player.color} animation={currentAnimation.current} isMoving={isMoving} />
+            <AvatarMesh shape={player.shape} color={player.color} animation={activeAnimation} isMoving={isMoving} playerName={player.name} />
             <Billboard position={[0, 1, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
                 <Text
                     fontSize={0.3}
@@ -502,7 +533,7 @@ export default function RoomPage() {
                 setRemotePlayers((prev) =>
                     prev.map((p) =>
                         p.id === message.playerId
-                            ? { ...p, position: message.position, rotation: message.rotation }
+                            ? { ...p, position: message.position, rotation: message.rotation, isMoving: message.isMoving }
                             : p
                     )
                 );
@@ -577,13 +608,13 @@ export default function RoomPage() {
         });
     };
 
-    const handlePlayerMove = (position: Position, rotation: number) => {
+    const handlePlayerMove = (position: Position, rotation: number, isMoving: boolean) => {
         // Throttle movement updates to ~20fps
         const now = Date.now();
         if (now - moveThrottleRef.current < 1) return;
         moveThrottleRef.current = now;
 
-        wsRef.current?.send(JSON.stringify({ action: 'PlayerMove', position, rotation }));
+        wsRef.current?.send(JSON.stringify({ action: 'PlayerMove', position, rotation, isMoving }));
     };
 
     const handleAnimation = (animation: AnimationType) => {

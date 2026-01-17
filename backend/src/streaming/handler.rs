@@ -32,6 +32,7 @@ pub struct PlayerData {
     pub activity: String,
     pub position: Position,
     pub rotation: f32,
+    pub is_moving: bool,
 }
 
 /// WebSocket actor for handling streaming sessions
@@ -306,12 +307,12 @@ impl Handler<ReceivedMessage> for StreamingSession {
                     });
                 });
             }
-            ReceivedMessage::PlayerMove { position, rotation } => {
+            ReceivedMessage::PlayerMove { position, rotation, is_moving } => {
                 let room = self.room.clone();
                 let player_id = self.player_id.clone();
                 
                 // Update position in room state
-                room.update_player_position(&player_id, position.clone(), rotation);
+                room.update_player_position(&player_id, position.clone(), rotation, is_moving);
                 
                 // Broadcast to all peers
                 room.get_peers(&player_id).iter().for_each(|peer| {
@@ -319,6 +320,7 @@ impl Handler<ReceivedMessage> for StreamingSession {
                         player_id: player_id.clone(),
                         position: position.clone(),
                         rotation,
+                        is_moving,
                     });
                 });
             }
@@ -377,7 +379,7 @@ enum ReceivedMessage {
     #[serde(rename_all = "camelCase")]
     ChatMessage { message: String },
     #[serde(rename_all = "camelCase")]
-    PlayerMove { position: Position, rotation: f32 },
+    PlayerMove { position: Position, rotation: f32, is_moving: bool },
     #[serde(rename_all = "camelCase")]
     PlayAnimation { animation: String },
 }
@@ -412,7 +414,7 @@ enum SendingMessage {
     #[serde(rename_all = "camelCase")]
     PlayerLeft { player_id: String },
     #[serde(rename_all = "camelCase")]
-    PlayerMoved { player_id: String, position: Position, rotation: f32 },
+    PlayerMoved { player_id: String, position: Position, rotation: f32, is_moving: bool },
     #[serde(rename_all = "camelCase")]
     PlayerAnimation { player_id: String, animation: String },
 }
