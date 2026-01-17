@@ -68,6 +68,7 @@ function usePlayerAnimation() {
 // Hook to manage character animations state machine
 function useCharacterAnimations(
     actions: any,
+    mixer: THREE.AnimationMixer,
     animation: AnimationType,
     isMoving: boolean,
     playerName: string
@@ -75,6 +76,7 @@ function useCharacterAnimations(
     const currentAction = useRef<THREE.AnimationAction | null>(null);
 
     useEffect(() => {
+        console.log(`DEBUG [${playerName}]: Actions available:`, Object.keys(actions));
         console.log(`DEBUG [${playerName}]: State:`, { animation, isMoving });
 
         const fadeTime = 0.2;
@@ -86,8 +88,6 @@ function useCharacterAnimations(
 
         if (animation === 'jump') {
             console.log('🐈 Animation: JUMP');
-            // Stop everything for T-pose effect as requested, or play jump anim if we had one
-            // User requested T-pose/Stop for jump
             if (currentAction.current) {
                 currentAction.current.fadeOut(0.05); // Faster fade out for jump
                 currentAction.current = null;
@@ -110,20 +110,24 @@ function useCharacterAnimations(
             // Fade out current
             if (currentAction.current) {
                 currentAction.current.fadeOut(nextFadeTime);
+                // Fade in next (smooth transition)
+                nextAction?.reset().fadeIn(nextFadeTime).play();
+            } else {
+                // First action (Spawn): Snap instantly
+                nextAction?.reset().play();
+                // Force mixer to update immediately to apply pose
+                mixer.update(0);
             }
 
-            // Fade in next
+            // Logging
             if (nextAction) {
-                nextAction.reset().fadeIn(nextFadeTime).play();
-
-                // Logging
-                if (isMoving) console.log('🐈 Animation: WALK');
-                else console.log('🐈 Animation: IDLE');
+                if (isMoving) console.log(`🐈 Animation: WALK (Snap: ${!currentAction.current})`);
+                else console.log(`🐈 Animation: IDLE (Snap: ${!currentAction.current})`);
             }
 
             currentAction.current = nextAction;
         }
-    }, [actions, animation, isMoving]);
+    }, [actions, mixer, animation, isMoving, playerName]);
 }
 
 // Cat Avatar Component
@@ -131,10 +135,10 @@ function CatAvatar({ animation, isMoving, playerName }: { animation: AnimationTy
     const { scene, animations } = useGLTF('/assets/models/TWISTED_cat_character.glb');
     // Clone scene using SkeletonUtils to properly handle SkinnedMeshes (animations)
     const clone = useMemo(() => SkeletonUtils.clone(scene), [scene]);
-    const { actions } = useAnimations(animations, clone);
+    const { actions, mixer } = useAnimations(animations, clone);
 
     // Use centralized animation logic
-    useCharacterAnimations(actions, animation, isMoving, playerName);
+    useCharacterAnimations(actions, mixer, animation, isMoving, playerName);
 
     return <primitive object={clone} scale={0.5} position={[0, -0.5, 0]} />;
 }
@@ -227,9 +231,9 @@ function LocalPlayer({
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             keysPressed.current.add(e.key.toLowerCase());
-            // Spacebar needs special handling since toLowerCase() doesn't change it
             if (e.key === ' ') keysPressed.current.add(' ');
         };
+
         const handleKeyUp = (e: KeyboardEvent) => {
             keysPressed.current.delete(e.key.toLowerCase());
             if (e.key === ' ') keysPressed.current.delete(' ');
@@ -237,16 +241,36 @@ function LocalPlayer({
 
         window.addEventListener('keydown', handleKeyDown);
         window.addEventListener('keyup', handleKeyUp);
+
         return () => {
             window.removeEventListener('keydown', handleKeyDown);
             window.removeEventListener('keyup', handleKeyUp);
         };
     }, []);
 
+    // Track inputs
+    const forward = keysPressed.current.has('w');
+    const backward = keysPressed.current.has('s');
+    const left = keysPressed.current.has('a');
+    const right = keysPressed.current.has('d');
+    const jump = keysPressed.current.has(' ');
+
     // Track movement state
     const [isMoving, setIsMoving] = useState(false);
     const isMovingRef = useRef(false);
     const wasMovingRef = useRef(false);
+
+    // Initial movement injection ("W tap" workaround for T-pose)
+    const [initialInjection, setInitialInjection] = useState(true);
+
+    useEffect(() => {
+        // Force a tiny movement state for 100ms on spawn
+        // This wakes up the animation mixer / state machine
+        const timer = setTimeout(() => {
+            setInitialInjection(false);
+        }, 100);
+        return () => clearTimeout(timer);
+    }, []);
 
     // Track active animation state for rendering
     const [activeAnimation, setActiveAnimation] = useState<AnimationType>(null);
@@ -257,6 +281,11 @@ function LocalPlayer({
         const speed = 5 * delta;
         const rotSpeed = 2 * delta;
         let moved = false;
+
+        // W-tap injection
+        if (initialInjection) {
+            moved = true;
+        }
 
         // Rotation
         if (keysPressed.current.has('a')) {
