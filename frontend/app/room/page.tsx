@@ -7,6 +7,7 @@ import { Text, Billboard, useTexture, useGLTF, useAnimations } from '@react-thre
 import { PublishTransport, SubscribeTransport } from 'rheomesh';
 import * as THREE from 'three';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+import { SpatialAudio } from './SpatialAudio';
 
 interface Position {
     x: number;
@@ -28,6 +29,8 @@ interface PlayerData {
 interface RemoteStream {
     publisherId: string;
     stream: MediaStream;
+    kind: 'audio' | 'video';
+    playerId?: string;
 }
 
 // Animation types that can be triggered
@@ -163,9 +166,19 @@ function AvatarMesh({ shape, color, animation, isMoving, playerName }: { shape: 
 }
 
 // Player avatar component with animation support
-function PlayerAvatar({ player, animation }: { player: PlayerData; animation: AnimationType }) {
+function PlayerAvatar({ player, animation, isTalking, audioStream }: { player: PlayerData; animation: AnimationType; isTalking?: boolean; audioStream?: MediaStream }) {
     const groupRef = useRef<THREE.Group>(null);
     const { triggerAnimation, updateAnimation } = usePlayerAnimation();
+    const micTexture = useTexture('/assets/textures/mic-talking-indicator_sprite_sheet.png');
+
+    // Configure sprite sheet texture
+    useEffect(() => {
+        if (micTexture) {
+            micTexture.wrapS = THREE.RepeatWrapping;
+            micTexture.repeat.set(0.5, 1); // Show half of the texture (one frame)
+            micTexture.offset.set(0, 0);
+        }
+    }, [micTexture]);
 
     // Trigger animation when prop changes
     useEffect(() => {
@@ -190,12 +203,31 @@ function PlayerAvatar({ player, animation }: { player: PlayerData; animation: An
         // Apply animation offset
         const heightOffset = updateAnimation(delta);
         groupRef.current.position.y = player.position.y + heightOffset;
+
+        // Animate sprite sheet if talking
+        if (isTalking && micTexture) {
+            micTexture.offset.x = Math.floor(Date.now() / 200) % 2 * 0.5;
+        }
     });
 
     return (
         <group ref={groupRef} position={[player.position.x, player.position.y, player.position.z]}>
             {/* Mesh handles shape rendering */}
             <AvatarMesh shape={player.shape} color={player.color} animation={animation} isMoving={isMoving} playerName={player.name} />
+
+            {/* Talking indicator */}
+            {isTalking && (
+                <Billboard position={[0, 1.6, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
+                    <mesh>
+                        <planeGeometry args={[0.4, 0.4]} />
+                        <meshBasicMaterial
+                            map={micTexture}
+                            transparent={true}
+                            opacity={1}
+                        />
+                    </mesh>
+                </Billboard>
+            )}
 
             <Billboard position={[0, 1, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
                 <Text
@@ -207,6 +239,16 @@ function PlayerAvatar({ player, animation }: { player: PlayerData; animation: An
                     {player.name}
                 </Text>
             </Billboard>
+
+            {/* Spatial audio */}
+            {audioStream && groupRef.current && (
+                <SpatialAudio
+                    audioStream={audioStream}
+                    targetPosition={groupRef.current.position}
+                    playerId={player.id}
+                    soundRadius={20}
+                />
+            )}
         </group>
     );
 }
@@ -215,11 +257,13 @@ function PlayerAvatar({ player, animation }: { player: PlayerData; animation: An
 function LocalPlayer({
     player,
     onMove,
-    onAnimation
+    onAnimation,
+    isTalking
 }: {
     player: PlayerData;
     onMove: (position: Position, rotation: number, isMoving: boolean) => void;
     onAnimation: (animation: AnimationType) => void;
+    isTalking?: boolean;
 }) {
     const groupRef = useRef<THREE.Group>(null);
     const { camera } = useThree();
@@ -227,6 +271,16 @@ function LocalPlayer({
     const positionRef = useRef<Position>({ ...player.position });
     const rotationRef = useRef<number>(player.rotation);
     const { triggerAnimation, updateAnimation, currentAnimation } = usePlayerAnimation();
+    const micTexture = useTexture('/assets/textures/mic-talking-indicator_sprite_sheet.png');
+
+    // Configure sprite sheet texture
+    useEffect(() => {
+        if (micTexture) {
+            micTexture.wrapS = THREE.RepeatWrapping;
+            micTexture.repeat.set(0.5, 1);
+            micTexture.offset.set(0, 0);
+        }
+    }, [micTexture]);
 
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
@@ -356,6 +410,11 @@ function LocalPlayer({
         );
         camera.lookAt(positionRef.current.x, positionRef.current.y + 0.5 + heightOffset, positionRef.current.z);
 
+        // Animate sprite sheet if talking
+        if (isTalking && micTexture) {
+            micTexture.offset.x = Math.floor(Date.now() / 200) % 2 * 0.5;
+        }
+
         // Send position update if moved OR if moving state changed (e.g. stopped)
         // We track previous moving state to ensure we send the "stop" event
         if (moved || isMovingRef.current !== wasMovingRef.current) {
@@ -367,6 +426,21 @@ function LocalPlayer({
     return (
         <group ref={groupRef} position={[player.position.x, player.position.y, player.position.z]}>
             <AvatarMesh shape={player.shape} color={player.color} animation={activeAnimation} isMoving={isMoving} playerName={player.name} />
+
+            {/* Talking indicator */}
+            {isTalking && (
+                <Billboard position={[0, 1.6, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
+                    <mesh>
+                        <planeGeometry args={[0.4, 0.4]} />
+                        <meshBasicMaterial
+                            map={micTexture}
+                            transparent={true}
+                            opacity={1}
+                        />
+                    </mesh>
+                </Billboard>
+            )}
+
             <Billboard position={[0, 1, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
                 <Text
                     fontSize={0.3}
@@ -427,7 +501,7 @@ function RoomWalls() {
     );
 }
 
-export default function RoomPage() {
+function RoomPage() {
     const searchParams = useSearchParams();
     const [isConnected, setIsConnected] = useState(false);
     const [roomTheme, setRoomTheme] = useState('');
@@ -437,18 +511,79 @@ export default function RoomPage() {
     const [chatInput, setChatInput] = useState('');
     const [remoteStreams, setRemoteStreams] = useState<RemoteStream[]>([]);
     const [playerAnimations, setPlayerAnimations] = useState<Record<string, AnimationType>>({});
+    const [talkingPlayers, setTalkingPlayers] = useState<Set<string>>(new Set());
 
     const wsRef = useRef<WebSocket | null>(null);
     const publishTransportRef = useRef<PublishTransport | null>(null);
     const subscribeTransportRef = useRef<SubscribeTransport | null>(null);
     const localVideoRef = useRef<HTMLVideoElement>(null);
     const localStreamRef = useRef<MediaStream | null>(null);
+    const localAudioStreamRef = useRef<MediaStream | null>(null);
     const publisherIdsRef = useRef<string[]>([]);
+    const audioPublisherIdsRef = useRef<string[]>([]);
     const subscribedIdsRef = useRef<Set<string>>(new Set());
     const moveThrottleRef = useRef<number>(0);
+    const [isMicActive, setIsMicActive] = useState(false);
+    const [isMicMuted, setIsMicMuted] = useState(false);
 
     const peerConnectionConfig: RTCConfiguration = {
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    };
+
+    const audioAnalyzersRef = useRef<Map<string, AnalyserNode>>(new Map());
+    const audioContextRef = useRef<AudioContext | null>(null);
+    const publisherToPlayerRef = useRef<Map<string, string>>(new Map()); // Maps publisherId → playerId
+    const lastTalkingTimeRef = useRef<Map<string, number>>(new Map()); // Track last time player was talking
+
+    // Audio level detection helper
+    const analyzeAudioLevel = (playerId: string, stream: MediaStream) => {
+        if (!audioContextRef.current) {
+            audioContextRef.current = new AudioContext();
+        }
+
+        const audioContext = audioContextRef.current;
+        const source = audioContext.createMediaStreamSource(stream);
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 512;
+        analyser.smoothingTimeConstant = 0.8;
+        source.connect(analyser);
+
+        audioAnalyzersRef.current.set(playerId, analyser);
+
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        const TALKING_THRESHOLD = 10; // Lower threshold for more sensitivity
+        const STOP_TALKING_DELAY = 800; // Delay in ms before removing talking indicator
+
+        const checkAudioLevel = () => {
+            analyser.getByteFrequencyData(dataArray);
+            const average = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length;
+
+            const now = Date.now();
+
+            setTalkingPlayers((prev) => {
+                const newSet = new Set(prev);
+
+                if (average > TALKING_THRESHOLD) {
+                    // Currently talking - add to set and update timestamp
+                    newSet.add(playerId);
+                    lastTalkingTimeRef.current.set(playerId, now);
+                } else {
+                    // Not currently talking - check if delay has passed
+                    const lastTime = lastTalkingTimeRef.current.get(playerId) || 0;
+                    if (now - lastTime > STOP_TALKING_DELAY) {
+                        // Delay has passed, remove from talking set
+                        newSet.delete(playerId);
+                    }
+                    // If delay hasn't passed, keep them in the set
+                }
+
+                return newSet;
+            });
+
+            requestAnimationFrame(checkAudioLevel);
+        };
+
+        checkAudioLevel();
     };
 
     useEffect(() => {
@@ -459,7 +594,14 @@ export default function RoomPage() {
         const activity = searchParams.get('activity') || 'hanging out';
 
         const params = new URLSearchParams({ name, shape, color, activity });
-        const ws = new WebSocket(`ws://localhost:3001/stream?${params.toString()}`);
+
+        // Use current hostname for WebSocket connection (works with ngrok)
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const host = window.location.host; // includes port if present
+        const wsUrl = `${protocol}//${host}/stream?${params.toString()}`;
+
+        console.log('Connecting to WebSocket:', wsUrl);
+        const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
         ws.onopen = () => {
@@ -495,6 +637,9 @@ export default function RoomPage() {
             clearInterval(pingInterval);
             if (localStreamRef.current) {
                 localStreamRef.current.getTracks().forEach((track) => track.stop());
+            }
+            if (localAudioStreamRef.current) {
+                localAudioStreamRef.current.getTracks().forEach((track) => track.stop());
             }
             ws.close();
         };
@@ -606,6 +751,12 @@ export default function RoomPage() {
 
             case 'Published':
                 message.publisherIds.forEach((publisherId: string) => {
+                    // Map publisherId to playerId for talking indicator
+                    if (message.playerId) {
+                        publisherToPlayerRef.current.set(publisherId, message.playerId);
+                        console.log(`Mapped publisher ${publisherId} to player ${message.playerId}`);
+                    }
+
                     if (!publisherIdsRef.current.includes(publisherId) && !subscribedIdsRef.current.has(publisherId)) {
                         subscribedIdsRef.current.add(publisherId);
                         subscribeToPublisher(publisherId);
@@ -617,8 +768,13 @@ export default function RoomPage() {
                 break;
 
             case 'Unpublished':
+                console.log('Unpublished publisher:', message.publisherId);
                 subscribedIdsRef.current.delete(message.publisherId);
-                setRemoteStreams((prev) => prev.filter((s) => s.publisherId !== message.publisherId));
+                setRemoteStreams((prev) => {
+                    const filtered = prev.filter((s) => s.publisherId !== message.publisherId);
+                    console.log('Remote streams after unpublish:', filtered.length);
+                    return filtered;
+                });
                 break;
         }
     };
@@ -630,9 +786,20 @@ export default function RoomPage() {
 
         subscribeTransportRef.current.subscribe(publisherId).then((subscriber) => {
             const stream = new MediaStream([subscriber.track]);
+            const kind = subscriber.track.kind as 'audio' | 'video';
+            console.log(`Subscribed to ${kind} track: ${publisherId}`);
+
+            // Start analyzing audio if this is an audio track
+            if (kind === 'audio') {
+                // Use playerId from mapping, fallback to publisherId
+                const playerId = publisherToPlayerRef.current.get(publisherId) || publisherId;
+                console.log(`Starting audio analysis for player ${playerId} (publisher: ${publisherId})`);
+                analyzeAudioLevel(playerId, stream);
+            }
+
             setRemoteStreams((prev) => {
                 if (prev.some((s) => s.publisherId === publisherId)) return prev;
-                return [...prev, { publisherId, stream }];
+                return [...prev, { publisherId, stream, kind }];
             });
         });
     };
@@ -690,9 +857,87 @@ export default function RoomPage() {
         publisherIdsRef.current = [];
     };
 
+    const startMicrophone = async () => {
+        try {
+            console.log('Starting microphone...');
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            localAudioStreamRef.current = stream;
+            setIsMicActive(true);
+            setIsMicMuted(false);
+
+            // Start analyzing local audio for talking indicator
+            if (localPlayer) {
+                analyzeAudioLevel(localPlayer.id, stream);
+            }
+
+            // Wait for publish transport to be ready
+            if (!publishTransportRef.current) {
+                console.error('PublishTransport not initialized');
+                return;
+            }
+
+            // Publish audio track
+            if (wsRef.current) {
+                for (const track of stream.getTracks()) {
+                    console.log('Publishing audio track:', track.kind);
+                    const publisher = await publishTransportRef.current.publish(track);
+                    console.log('Audio publisher created:', publisher.id);
+                    wsRef.current.send(JSON.stringify({ action: 'Offer', sdp: publisher.offer }));
+                    wsRef.current.send(JSON.stringify({ action: 'Publish', publisherId: publisher.id }));
+                    audioPublisherIdsRef.current.push(publisher.id);
+                    publisherIdsRef.current.push(publisher.id);
+                }
+            }
+        } catch (error) {
+            console.error('Error starting microphone:', error);
+        }
+    };
+
+    const stopMicrophone = () => {
+        // Stop local audio tracks
+        if (localAudioStreamRef.current) {
+            localAudioStreamRef.current.getTracks().forEach((track) => {
+                track.stop();
+            });
+            localAudioStreamRef.current = null;
+        }
+
+        // Send StopPublish for all audio publisher IDs
+        audioPublisherIdsRef.current.forEach((id) => {
+            console.log('Stopping audio publisher:', id);
+            wsRef.current?.send(JSON.stringify({ action: 'StopPublish', publisherId: id }));
+        });
+
+        // Remove audio IDs from both refs
+        publisherIdsRef.current = publisherIdsRef.current.filter(
+            (id) => !audioPublisherIdsRef.current.includes(id)
+        );
+        audioPublisherIdsRef.current = [];
+
+        setIsMicActive(false);
+        setIsMicMuted(false);
+    };
+
+    const toggleMicMute = () => {
+        if (localAudioStreamRef.current) {
+            const audioTracks = localAudioStreamRef.current.getAudioTracks();
+            audioTracks.forEach((track) => {
+                track.enabled = !track.enabled;
+            });
+            setIsMicMuted(!isMicMuted);
+        }
+    };
+
     return (
-        <div className="h-screen w-screen bg-gray-900 flex">
-            {/* 3D Room */}
+        <>
+            <style>{`
+                @keyframes talkSprite {
+                    from { background-position: 0% 0; }
+                    to { background-position: 100% 0; }
+                }
+            `}</style>
+            <div className="h-screen w-screen bg-gray-900 flex">
+                {/* 3D Room */}
             <div className="flex-1 relative">
                 <Canvas>
                     <ambientLight intensity={0.4} />
@@ -701,15 +946,34 @@ export default function RoomPage() {
                     <RoomWalls />
                     <Suspense fallback={null}>
                         {localPlayer && (
-                            <LocalPlayer player={localPlayer} onMove={handlePlayerMove} onAnimation={handleAnimation} />
-                        )}
-                        {remotePlayers.map((player) => (
-                            <PlayerAvatar
-                                key={player.id}
-                                player={player}
-                                animation={playerAnimations[player.id] || null}
+                            <LocalPlayer
+                                player={localPlayer}
+                                onMove={handlePlayerMove}
+                                onAnimation={handleAnimation}
+                                isTalking={talkingPlayers.has(localPlayer.id)}
                             />
-                        ))}
+                        )}
+                        {remotePlayers.map((player) => {
+                            // Check if this player is talking
+                            const isTalking = talkingPlayers.has(player.id);
+
+                            // Find audio stream for this player
+                            const audioStream = remoteStreams.find((stream) => {
+                                if (stream.kind !== 'audio') return false;
+                                const playerId = publisherToPlayerRef.current.get(stream.publisherId);
+                                return playerId === player.id;
+                            })?.stream;
+
+                            return (
+                                <PlayerAvatar
+                                    key={player.id}
+                                    player={player}
+                                    animation={playerAnimations[player.id] || null}
+                                    isTalking={isTalking}
+                                    audioStream={audioStream}
+                                />
+                            );
+                        })}
                     </Suspense>
                 </Canvas>
 
@@ -745,13 +1009,57 @@ export default function RoomPage() {
                         </button>
                     </div>
 
+                    {/* Microphone controls */}
+                    <div className="flex gap-2 mb-2">
+                        {!isMicActive ? (
+                            <button
+                                onClick={startMicrophone}
+                                className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm text-white"
+                            >
+                                🎤 Start Mic
+                            </button>
+                        ) : (
+                            <>
+                                <button
+                                    onClick={toggleMicMute}
+                                    className={`flex-1 py-2 rounded text-sm text-white ${
+                                        isMicMuted ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'
+                                    }`}
+                                >
+                                    {isMicMuted ? '🔇 Unmute' : '🎤 Mute'}
+                                </button>
+                                <button
+                                    onClick={stopMicrophone}
+                                    className="flex-1 py-2 bg-red-600 hover:bg-red-700 rounded text-sm text-white"
+                                >
+                                    ⏹ Stop Mic
+                                </button>
+                            </>
+                        )}
+                    </div>
+
+                    {/* Local player talking indicator */}
+                    {isMicActive && localPlayer && talkingPlayers.has(localPlayer.id) && !isMicMuted && (
+                        <div className="flex items-center gap-2 bg-blue-900/30 border border-blue-500/50 rounded px-2 py-1 mb-2">
+                            <div
+                                className="w-4 h-4"
+                                style={{
+                                    backgroundImage: 'url(/assets/textures/mic-talking-indicator_sprite_sheet.png)',
+                                    backgroundSize: '200% 100%',
+                                    animation: 'talkSprite 0.4s steps(2) infinite',
+                                }}
+                            />
+                            <span className="text-blue-300 text-xs font-medium">You are talking</span>
+                        </div>
+                    )}
+
                     {/* Local stream */}
                     <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-24 bg-black rounded mb-2" />
 
-                    {/* Remote streams */}
-                    <div className="space-y-2 max-h-32 overflow-y-auto">
+                    {/* Remote video streams */}
+                    <div className="space-y-2 max-h-32 overflow-y-auto mb-2">
                         {remoteStreams
-                            .filter((s) => s.stream.getVideoTracks().length > 0)
+                            .filter((s) => s.kind === 'video')
                             .map((remote) => (
                                 <video
                                     key={remote.publisherId}
@@ -763,6 +1071,38 @@ export default function RoomPage() {
                                     }}
                                 />
                             ))}
+                    </div>
+
+                    {/* Remote audio streams */}
+                    <div className="space-y-1">
+                        {remoteStreams
+                            .filter((s) => s.kind === 'audio')
+                            .map((remote) => {
+                                const playerId = publisherToPlayerRef.current.get(remote.publisherId);
+                                const player = remotePlayers.find((p) => p.id === playerId);
+                                const isTalking = playerId ? talkingPlayers.has(playerId) : false;
+
+                                return (
+                                    <div key={remote.publisherId} className="flex items-center gap-2 bg-gray-700 rounded px-2 py-1">
+                                        {isTalking ? (
+                                            <div
+                                                className="w-4 h-4"
+                                                style={{
+                                                    backgroundImage: 'url(/assets/textures/mic-talking-indicator_sprite_sheet.png)',
+                                                    backgroundSize: '200% 100%',
+                                                    animation: 'talkSprite 0.4s steps(2) infinite',
+                                                }}
+                                            />
+                                        ) : (
+                                            <span className="text-gray-500 text-xs">🎤</span>
+                                        )}
+                                        <span className="text-gray-300 text-xs flex-1">
+                                            {player ? player.name : `Audio ${remote.publisherId.slice(0, 8)}`}
+                                        </span>
+                                        <span className="text-blue-400 text-xs">3D Audio</span>
+                                    </div>
+                                );
+                            })}
                     </div>
                 </div>
 
@@ -802,5 +1142,14 @@ export default function RoomPage() {
                 </div>
             </div>
         </div>
+        </>
+    );
+}
+
+export default function RoomPageWrapper() {
+    return (
+        <Suspense fallback={<div className="h-screen w-screen bg-gray-900 flex items-center justify-center text-white">Loading room...</div>}>
+            <RoomPage />
+        </Suspense>
     );
 }
