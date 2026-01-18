@@ -10,6 +10,7 @@ import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { SpatialAudio } from './SpatialAudio';
 import { SplatViewer } from './SplatViewer';
 import { RoomEffects } from './RoomEffects';
+import { AnimaleseChatBubble } from './AnimaleseChatBubble';
 
 interface Position {
     x: number;
@@ -21,6 +22,7 @@ interface FacialFeatures {
     eyeStyle: string;
     noseStyle: string;
     mouthStyle: string;
+    characterType: 'cat' | 'dog';
 }
 
 interface PlayerData {
@@ -45,7 +47,7 @@ interface RemoteStream {
 type AnimationType = 'jump' | 'wave' | 'dance' | null;
 
 // Streaming Screen component - displays video stream as a 3D texture
-function StreamingScreen({ videoStream, onClick }: { videoStream: MediaStream; onClick?: () => void }) {
+function StreamingScreen({ videoStream, onClick, isCinemaOverride }: { videoStream: MediaStream; onClick?: () => void; isCinemaOverride?: boolean }) {
     const [videoTexture, setVideoTexture] = useState<THREE.VideoTexture | null>(null);
     const meshRef = useRef<THREE.Mesh>(null);
 
@@ -88,6 +90,27 @@ function StreamingScreen({ videoStream, onClick }: { videoStream: MediaStream; o
     });
 
     if (!videoTexture) return null;
+
+    if (isCinemaOverride) {
+        return (
+            <group position={[1.25, 4, 5]} rotation={[0, Math.PI, 0]}>
+                <mesh
+                    ref={meshRef}
+                    onClick={(e) => {
+                        if (onClick) {
+                            e.stopPropagation();
+                            onClick();
+                        }
+                    }}
+                    onPointerOver={() => document.body.style.cursor = onClick ? 'pointer' : 'default'}
+                    onPointerOut={() => document.body.style.cursor = 'default'}
+                >
+                    <planeGeometry args={[8.5, 5]} />
+                    <meshBasicMaterial map={videoTexture} side={THREE.DoubleSide} />
+                </mesh>
+            </group>
+        );
+    }
 
     return (
         <group position={[0, -0.1, 0.35]} rotation={[1.22, Math.PI, 0]}>
@@ -139,7 +162,19 @@ function usePlayerAnimation() {
         }
     };
 
+    const cancelAnimation = () => {
+        if (currentAnimation.current === 'dance') {
+            currentAnimation.current = null;
+            animationProgress.current = 0;
+        }
+    };
+
     const updateAnimation = (delta: number): number => {
+        // Special case for persistent animations
+        if (currentAnimation.current === 'dance') {
+            return 0;
+        }
+
         if (currentAnimation.current || animationProgress.current > 0) {
             animationProgress.current += delta * 3;
             if (animationProgress.current >= 1) {
@@ -149,13 +184,13 @@ function usePlayerAnimation() {
         }
 
         // Return height offset based on animation
-        if (currentAnimation.current === 'jump' || animationProgress.current > 0) {
+        if (currentAnimation.current === 'jump') {
             return Math.sin(animationProgress.current * Math.PI) * 1.5;
         }
         return 0;
     };
 
-    return { triggerAnimation, updateAnimation, currentAnimation, animationProgress };
+    return { triggerAnimation, updateAnimation, cancelAnimation, currentAnimation, animationProgress };
 
 }
 
@@ -170,9 +205,6 @@ function useCharacterAnimations(
     const currentAction = useRef<THREE.AnimationAction | null>(null);
 
     useEffect(() => {
-        console.log(`DEBUG [${playerName}]: Actions available:`, Object.keys(actions));
-        console.log(`DEBUG [${playerName}]: State:`, { animation, isMoving });
-
         const fadeTime = 0.2;
         let nextAction: THREE.AnimationAction | null = null;
         let nextFadeTime = fadeTime;
@@ -181,10 +213,23 @@ function useCharacterAnimations(
         // Priority: Jump (One-shot) > Move (Loop) > Idle (Loop)
 
         if (animation === 'jump') {
-            console.log('🐈 Animation: JUMP');
             if (currentAction.current) {
                 currentAction.current.fadeOut(0.05); // Faster fade out for jump
                 currentAction.current = null;
+            }
+            return;
+        }
+
+        if (animation === 'dance') {
+            console.log('🐕 Animation: DANCE');
+            const danceAction = actions['Dance'];
+            if (danceAction && danceAction !== currentAction.current) {
+                if (currentAction.current) {
+                    currentAction.current.fadeOut(0.2);
+                }
+                // LoopRepeat for continuous dancing
+                danceAction.reset().setLoop(THREE.LoopRepeat, Infinity).fadeIn(0.2).play();
+                currentAction.current = danceAction;
             }
             return;
         }
@@ -213,12 +258,6 @@ function useCharacterAnimations(
                 mixer.update(0);
             }
 
-            // Logging
-            if (nextAction) {
-                if (isMoving) console.log(`🐈 Animation: WALK (Snap: ${!currentAction.current})`);
-                else console.log(`🐈 Animation: IDLE (Snap: ${!currentAction.current})`);
-            }
-
             currentAction.current = nextAction;
         }
     }, [actions, mixer, animation, isMoving, playerName]);
@@ -230,13 +269,15 @@ function CatAvatar({
     color,
     animation,
     isMoving,
-    playerName
+    playerName,
+    isFirstPerson
 }: {
     facialFeatures: FacialFeatures;
     color: string;
     animation: AnimationType;
     isMoving: boolean;
     playerName: string;
+    isFirstPerson?: boolean;
 }) {
     const { scene, animations } = useGLTF('/assets/models/TWISTED_cat_character.glb');
     // Clone scene using SkeletonUtils to properly handle SkinnedMeshes (animations)
@@ -269,10 +310,8 @@ function CatAvatar({
 
     // Apply textures and colors to named meshes
     useEffect(() => {
-        console.log('Traversing clone for facial meshes...');
         clone.traverse((child) => {
             if (child instanceof THREE.Mesh) {
-                console.log('Found mesh:', child.name, 'Material type:', child.material.constructor.name);
                 switch (child.name) {
                     case 'twisted_cat':
                         // Apply fur color to body mesh
@@ -282,7 +321,6 @@ function CatAvatar({
                         }
                         break;
                     case 'twisted_cat_eyes_mesh':
-                        console.log('Applying eye texture to:', child.name);
                         if (child.material instanceof THREE.MeshStandardMaterial) {
                             child.material.map = eyeTexture;
                             child.material.transparent = true;
@@ -292,7 +330,6 @@ function CatAvatar({
                         }
                         break;
                     case 'twisted_cat_nose_mesh':
-                        console.log('Applying nose texture to:', child.name);
                         if (child.material instanceof THREE.MeshStandardMaterial) {
                             child.material.map = noseTexture;
                             child.material.transparent = true;
@@ -302,7 +339,6 @@ function CatAvatar({
                         }
                         break;
                     case 'twisted_cat_mouth_mesh':
-                        console.log('Applying mouth texture to:', child.name);
                         if (child.material instanceof THREE.MeshStandardMaterial) {
                             child.material.map = mouthTexture;
                             child.material.transparent = true;
@@ -316,26 +352,142 @@ function CatAvatar({
         });
     }, [clone, color, eyeTexture, noseTexture, mouthTexture]);
 
+    // Handle Head Visibility for First Person View
+    useEffect(() => {
+        const headBone = clone.getObjectByName('Head') || clone.getObjectByName('head');
+        if (headBone) {
+            if (isFirstPerson) {
+                headBone.scale.set(0, 0, 0);
+            } else {
+                headBone.scale.set(1, 1, 1);
+            }
+        }
+
+        // Hide/Show facial features
+        ['twisted_cat_eyes_mesh', 'twisted_cat_nose_mesh', 'twisted_cat_mouth_mesh'].forEach(name => {
+            const mesh = clone.getObjectByName(name);
+            if (mesh) mesh.visible = !isFirstPerson;
+        });
+    }, [clone, isFirstPerson]);
+
     // Use centralized animation logic
     useCharacterAnimations(actions, mixer, animation, isMoving, playerName);
 
     return <primitive object={clone} scale={0.5} position={[0, -0.5, 0]} />;
 }
 
-// Unified Avatar Mesh Component (cat-only for now)
-function AvatarMesh({
+// Dog Avatar Component
+function DogAvatar({
     facialFeatures,
     color,
     animation,
     isMoving,
-    playerName
+    playerName,
+    isFirstPerson
 }: {
     facialFeatures: FacialFeatures;
     color: string;
     animation: AnimationType;
     isMoving: boolean;
     playerName: string;
+    isFirstPerson?: boolean;
 }) {
+    const { scene, animations } = useGLTF('/assets/models/TWISTED_dog_character.glb');
+    const clone = useMemo(() => {
+        const c = SkeletonUtils.clone(scene);
+        c.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+                child.material = child.material.clone();
+            }
+        });
+        return c;
+    }, [scene]);
+    const { actions, mixer } = useAnimations(animations, clone);
+
+    // Load facial textures (dog uses different naming convention)
+    const eyeTexture = useTexture(
+        `/assets/textures/character_facial_textures/eyes/${facialFeatures.eyeStyle}.png`
+    );
+    const noseTexture = useTexture(
+        `/assets/textures/character_facial_textures/nose/${facialFeatures.noseStyle}.png`
+    );
+
+    eyeTexture.flipY = false;
+    noseTexture.flipY = false;
+
+    // Apply textures and colors to named meshes
+    useEffect(() => {
+        clone.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+                switch (child.name) {
+                    case 'twisted_dog':
+                        if (child.material instanceof THREE.MeshStandardMaterial) {
+                            child.material.color.set(color);
+                            child.material.needsUpdate = true;
+                        }
+                        break;
+                    case 'twisted_dog_eyes_mesh':
+                        if (child.material instanceof THREE.MeshStandardMaterial) {
+                            child.material.map = eyeTexture;
+                            child.material.transparent = true;
+                            child.material.alphaTest = 0.1;
+                            child.material.color.set(0xffffff);
+                            child.material.needsUpdate = true;
+                        }
+                        break;
+                    case 'twisted_dog_nose_mesh':
+                        if (child.material instanceof THREE.MeshStandardMaterial) {
+                            child.material.map = noseTexture;
+                            child.material.transparent = true;
+                            child.material.alphaTest = 0.1;
+                            child.material.color.set(0xffffff);
+                            child.material.needsUpdate = true;
+                        }
+                        break;
+                }
+            }
+        });
+    }, [clone, color, eyeTexture, noseTexture]);
+
+    // Hide in first person
+    useEffect(() => {
+        clone.visible = !isFirstPerson;
+    }, [clone, isFirstPerson]);
+
+    // Use centralized animation logic
+    useCharacterAnimations(actions, mixer, animation, isMoving, playerName);
+
+    return <primitive object={clone} scale={0.5} position={[0, -0.5, 0]} />;
+}
+
+// Unified Avatar Mesh Component (cat or dog based on characterType)
+function AvatarMesh({
+    facialFeatures,
+    color,
+    animation,
+    isMoving,
+    playerName,
+    isFirstPerson
+}: {
+    facialFeatures: FacialFeatures;
+    color: string;
+    animation: AnimationType;
+    isMoving: boolean;
+    playerName: string;
+    isFirstPerson?: boolean;
+}) {
+    if (facialFeatures.characterType === 'dog') {
+        return (
+            <DogAvatar
+                facialFeatures={facialFeatures}
+                color={color}
+                animation={animation}
+                isMoving={isMoving}
+                playerName={playerName}
+                isFirstPerson={isFirstPerson}
+            />
+        );
+    }
     return (
         <CatAvatar
             facialFeatures={facialFeatures}
@@ -343,12 +495,13 @@ function AvatarMesh({
             animation={animation}
             isMoving={isMoving}
             playerName={playerName}
+            isFirstPerson={isFirstPerson}
         />
     );
 }
 
 // Player avatar component with animation support
-function PlayerAvatar({ player, animation, isTalking, audioStream, videoStream, localPlayerPosition, onTabletClick }: { player: PlayerData; animation: AnimationType; isTalking?: boolean; audioStream?: MediaStream; videoStream?: MediaStream; localPlayerPosition?: THREE.Vector3; onTabletClick?: () => void }) {
+function PlayerAvatar({ player, animation, isTalking, audioStream, videoStream, localPlayerPosition, onTabletClick, hideTablet, chatBubble }: { player: PlayerData; animation: AnimationType; isTalking?: boolean; audioStream?: MediaStream; videoStream?: MediaStream; localPlayerPosition?: THREE.Vector3; onTabletClick?: () => void; hideTablet?: boolean; chatBubble?: { message: string; timestamp: number } }) {
     const groupRef = useRef<THREE.Group>(null);
     const { triggerAnimation, updateAnimation } = usePlayerAnimation();
     const micTexture = useTexture('/assets/textures/mic-talking-indicator_sprite_sheet.png');
@@ -404,7 +557,7 @@ function PlayerAvatar({ player, animation, isTalking, audioStream, videoStream, 
             />
 
             {/* Streaming Screen - floating video display */}
-            {videoStream && <StreamingScreen videoStream={videoStream} onClick={onTabletClick} />}
+            {videoStream && !hideTablet && <StreamingScreen videoStream={videoStream} onClick={onTabletClick} />}
 
             {/* Talking indicator */}
             {isTalking && (
@@ -431,6 +584,15 @@ function PlayerAvatar({ player, animation, isTalking, audioStream, videoStream, 
                 </Text>
             </Billboard>
 
+            {/* Chat Bubble with Animalese */}
+            {chatBubble && (
+                <AnimaleseChatBubble
+                    message={chatBubble.message}
+                    timestamp={chatBubble.timestamp}
+                    position={[0, 1.5, 0]}
+                />
+            )}
+
             {/* Spatial audio */}
             {audioStream && groupRef.current && localPlayerPosition && (
                 <SpatialAudio
@@ -452,7 +614,11 @@ function LocalPlayer({
     onAnimation,
     isTalking,
     videoStream,
-    isCamping
+    isCamping,
+    isCinema,
+    hideTablet,
+    chatInputFocused,
+    chatBubble
 }: {
     player: PlayerData;
     onMove: (position: Position, rotation: number, isMoving: boolean) => void;
@@ -460,13 +626,17 @@ function LocalPlayer({
     isTalking?: boolean;
     videoStream?: MediaStream;
     isCamping?: boolean;
+    isCinema?: boolean;
+    hideTablet?: boolean;
+    chatInputFocused?: boolean;
+    chatBubble?: { message: string; timestamp: number } | null;
 }) {
     const groupRef = useRef<THREE.Group>(null);
-    const { camera, gl } = useThree();
+    const { camera, gl, scene } = useThree();
     const keysPressed = useRef<Set<string>>(new Set());
     const positionRef = useRef<Position>({ ...player.position });
     const rotationRef = useRef<number>(player.rotation);
-    const { triggerAnimation, updateAnimation, currentAnimation } = usePlayerAnimation();
+    const { triggerAnimation, updateAnimation, cancelAnimation, currentAnimation } = usePlayerAnimation();
     const micTexture = useTexture('/assets/textures/mic-talking-indicator_sprite_sheet.png');
 
     // Configure sprite sheet texture
@@ -491,7 +661,6 @@ function LocalPlayer({
 
         const handlePointerDown = (e: PointerEvent) => {
             if (e.button === 1) { // Middle Mouse
-                console.log('🖱️ Middle Mouse DOWN - Orbit Start');
                 isOrbiting.current = true;
                 e.preventDefault();
                 domElement.setPointerCapture(e.pointerId);
@@ -502,7 +671,6 @@ function LocalPlayer({
 
         const handlePointerUp = (e: PointerEvent) => {
             if (e.button === 1) {
-                console.log('🖱️ Middle Mouse UP - Orbit End');
                 isOrbiting.current = false;
                 domElement.releasePointerCapture(e.pointerId);
                 domElement.style.cursor = 'auto';
@@ -562,6 +730,17 @@ function LocalPlayer({
             if (e.key.toLowerCase() === 't') {
                 cameraOffset.current = { azimuth: 0, elevation: 0, radius: 5 };
             }
+
+            // Toggle First Person
+            if (e.key.toLowerCase() === 'f') {
+                setIsFirstPerson(prev => !prev);
+            }
+
+            // Dance animation
+            if (e.key.toLowerCase() === 'y' && !currentAnimation.current) {
+                triggerAnimation('dance');
+                onAnimation('dance');
+            }
         };
 
         const handleKeyUp = (e: KeyboardEvent) => {
@@ -589,6 +768,7 @@ function LocalPlayer({
     const [isMoving, setIsMoving] = useState(false);
     const isMovingRef = useRef(false);
     const wasMovingRef = useRef(false);
+    const [isFirstPerson, setIsFirstPerson] = useState(false);
 
     // Initial movement injection ("W tap" workaround for T-pose)
     const [initialInjection, setInitialInjection] = useState(true);
@@ -607,10 +787,12 @@ function LocalPlayer({
 
     useFrame((_, delta) => {
         if (!groupRef.current) return;
+        if (chatInputFocused) return; // Block movement while typing
 
         const speed = 5 * delta;
         const rotSpeed = 2 * delta;
         let moved = false;
+
 
         // W-tap injection
         if (initialInjection) {
@@ -634,21 +816,47 @@ function LocalPlayer({
             Math.cos(rotationRef.current)
         );
 
+        // Collision Check Helper
+        const canMove = (dir: THREE.Vector3) => {
+            if (isCamping) return true; // Disable collision for camping (splats)
+
+            const startPos = new THREE.Vector3(positionRef.current.x, positionRef.current.y + 0.5, positionRef.current.z);
+            const raycaster = new THREE.Raycaster(startPos, dir, 0, 1.0); // 1 unit reach
+
+            const collisionWorld = scene.getObjectByName('collision-world');
+            if (!collisionWorld) return true; // No world, allow move
+
+            const intersects = raycaster.intersectObject(collisionWorld, true);
+            // If hit is less than 0.5 (radius), block
+            return !intersects.some(hit => hit.distance < 0.8);
+        };
+
         if (keysPressed.current.has('w')) {
-            positionRef.current.x += direction.x * speed;
-            positionRef.current.z += direction.z * speed;
-            moved = true;
+            if (canMove(direction)) {
+                positionRef.current.x += direction.x * speed;
+                positionRef.current.z += direction.z * speed;
+                moved = true;
+            }
         }
         if (keysPressed.current.has('s')) {
-            positionRef.current.x -= direction.x * speed;
-            positionRef.current.z -= direction.z * speed;
-            moved = true;
+            // Backward check (invert direction)
+            const backDir = direction.clone().negate();
+            if (canMove(backDir)) {
+                positionRef.current.x -= direction.x * speed;
+                positionRef.current.z -= direction.z * speed;
+                moved = true;
+            }
         }
 
         // Update walking state
         if (moved !== isMovingRef.current) {
             isMovingRef.current = moved;
             setIsMoving(moved);
+        }
+
+        // Cancel persistent animations (like dance) if moving
+        if (moved) {
+            cancelAnimation();
         }
 
         if (isCamping) {
@@ -725,6 +933,25 @@ function LocalPlayer({
 
             // Smooth gravity/step-up
             positionRef.current.y = THREE.MathUtils.lerp(positionRef.current.y, targetY, 0.2);
+        } else if (isCinema) {
+            // Cinema Stage Platform (Simple Rectangle)
+            // X: -3.6 to 5.75
+            // Z: 1.6 to 4.6
+            // Y: 1
+            const px = positionRef.current.x;
+            const pz = positionRef.current.z;
+
+            // Platform 1 (Main Stage)
+            const onStage1 = px >= -3.6 && px <= 5.75 && pz >= .93 && pz <= 4.6;
+            // Platform 2 (Small Side Platform)
+            const onStage2 = px >= -3.7 && px <= 2.29 && pz >= -1.77 && pz <= -1.22;
+
+            let targetY = 0;
+            if (onStage1) targetY = 1.0;
+            else if (onStage2) targetY = 0.5;
+
+            // Smooth gravity/step-up
+            positionRef.current.y = THREE.MathUtils.lerp(positionRef.current.y, targetY, 0.2);
         }
 
         // Clamp to room boundaries (Removed for Camp scene)
@@ -755,23 +982,51 @@ function LocalPlayer({
         groupRef.current.rotation.y = rotationRef.current;
 
         // --- CAMERA LOGIC ---
-        // Calculate orbit position
-        // Default: Behind player (rotationRef.current + PI)
-        // Offset: cameraOffset.current.azimuth
-        const totalAzimuth = rotationRef.current + Math.PI + cameraOffset.current.azimuth;
-        const totalElevation = cameraOffset.current.elevation;
+        if (isFirstPerson) {
+            // First Person Logic
+            // Position: Eye level (Model is scaled 0.5, feet at -0.5. Head approx at 0.5. Eyes ~0.4)
+            // Forward Offset to avoid chest clipping
+            const forwardOffset = 0.25;
+            const eyeY = positionRef.current.y + 0.4 + heightOffset;
 
-        // Spherical to Cartesian
-        // Radius = 5 (Dynamic)
-        const radius = cameraOffset.current.radius;
-        // y is Up.
-        const camX = positionRef.current.x + radius * Math.sin(totalAzimuth) * Math.cos(totalElevation);
-        const camZ = positionRef.current.z + radius * Math.cos(totalAzimuth) * Math.cos(totalElevation);
-        const camY = positionRef.current.y + 3 + heightOffset * 0.5 + (radius * Math.sin(totalElevation));
+            const camX = positionRef.current.x + Math.sin(rotationRef.current) * forwardOffset;
+            const camZ = positionRef.current.z + Math.cos(rotationRef.current) * forwardOffset;
 
-        // Update camera to follow
-        camera.position.set(camX, camY, camZ);
-        camera.lookAt(positionRef.current.x, positionRef.current.y + heightOffset, positionRef.current.z); // Look slightly higher
+            camera.position.set(camX, eyeY, camZ);
+
+            // Look Direction
+            // Yaw: rotationRef.current (Model forward)
+            // Pitch: cameraOffset.current.elevation
+            const yaw = rotationRef.current;
+            const pitch = cameraOffset.current.elevation;
+
+            // Look at point at distance
+            const lookDist = 5;
+            const lookX = camX + lookDist * Math.sin(yaw) * Math.cos(pitch);
+            const lookZ = camZ + lookDist * Math.cos(yaw) * Math.cos(pitch);
+            const lookY = eyeY + lookDist * Math.sin(pitch);
+
+            camera.lookAt(lookX, lookY, lookZ);
+        } else {
+            // Third Person Orbit Logic
+            // Calculate orbit position
+            // Default: Behind player (rotationRef.current + PI)
+            // Offset: cameraOffset.current.azimuth
+            const totalAzimuth = rotationRef.current + Math.PI + cameraOffset.current.azimuth;
+            const totalElevation = cameraOffset.current.elevation;
+
+            // Spherical to Cartesian
+            // Radius = 5 (Dynamic)
+            const radius = cameraOffset.current.radius;
+            // y is Up.
+            const camX = positionRef.current.x + radius * Math.sin(totalAzimuth) * Math.cos(totalElevation);
+            const camZ = positionRef.current.z + radius * Math.cos(totalAzimuth) * Math.cos(totalElevation);
+            const camY = positionRef.current.y + 3 + heightOffset * 0.5 + (radius * Math.sin(totalElevation));
+
+            // Update camera to follow
+            camera.position.set(camX, camY, camZ);
+            camera.lookAt(positionRef.current.x, positionRef.current.y + heightOffset, positionRef.current.z); // Look slightly higher
+        }
 
         // Animate sprite sheet if talking
         if (isTalking && micTexture) {
@@ -794,10 +1049,11 @@ function LocalPlayer({
                 animation={activeAnimation}
                 isMoving={isMoving}
                 playerName={player.name}
+                isFirstPerson={isFirstPerson}
             />
 
             {/* Streaming Screen - floating video display */}
-            {videoStream && <StreamingScreen videoStream={videoStream} />}
+            {videoStream && !hideTablet && <StreamingScreen videoStream={videoStream} />}
 
             {/* Talking indicator */}
             {isTalking && (
@@ -813,16 +1069,27 @@ function LocalPlayer({
                 </Billboard>
             )}
 
-            <Billboard position={[0, 1, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
-                <Text
-                    fontSize={0.3}
-                    color="white"
-                    anchorX="center"
-                    anchorY="bottom"
-                >
-                    {player.name} (you)
-                </Text>
-            </Billboard>
+            {!isFirstPerson && (
+                <Billboard position={[0, 1, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
+                    <Text
+                        fontSize={0.3}
+                        color="white"
+                        anchorX="center"
+                        anchorY="bottom"
+                    >
+                        {player.name} (you)
+                    </Text>
+                </Billboard>
+            )}
+
+            {/* Chat Bubble with Animalese */}
+            {chatBubble && (
+                <AnimaleseChatBubble
+                    message={chatBubble.message}
+                    timestamp={chatBubble.timestamp}
+                    position={[0, 1.5, 0]}
+                />
+            )}
         </group>
     );
 }
@@ -873,13 +1140,53 @@ function RoomWalls() {
     );
 }
 
+// Cinema Model
+function CinemaModel() {
+    const { scene } = useGLTF('/assets/cinemamovie_theater_interior.glb');
+
+    useEffect(() => {
+        scene.traverse((c) => {
+            if (c instanceof THREE.Mesh) {
+                c.userData.isCollision = true;
+                // Force One-Way Visibility (Backface Culling)
+                if (c.material) {
+                    c.material.side = THREE.FrontSide;
+                    c.material.shadowSide = THREE.FrontSide;
+                    c.material.needsUpdate = true;
+                }
+            }
+        });
+    }, [scene]);
+
+    return <primitive object={scene} scale={[2, 2, 2]} position={[140, 0.5, 50]} name="collision-world" />;
+}
+
+// City Model
+function CityModel() {
+    const { scene } = useGLTF('/assets/city_at_night.glb');
+
+    useEffect(() => {
+        scene.traverse((c) => {
+            if (c instanceof THREE.Mesh) {
+                c.userData.isCollision = true;
+            }
+        });
+    }, [scene]);
+
+    return <primitive object={scene} scale={[.1, .1, .1]} position={[0, -1, 0]} name="collision-world" />;
+}
+
 function RoomPage() {
     const searchParams = useSearchParams();
     const [isConnected, setIsConnected] = useState(false);
     const [roomTheme, setRoomTheme] = useState('');
     const [localPlayer, setLocalPlayer] = useState<PlayerData | null>(null);
     const [remotePlayers, setRemotePlayers] = useState<PlayerData[]>([]);
+    const remotePlayersRef = useRef<PlayerData[]>([]);
     const [chatMessages, setChatMessages] = useState<{ sender: string; message: string }[]>([]);
+    const [playerChatBubbles, setPlayerChatBubbles] = useState<{ [playerId: string]: { message: string; timestamp: number } }>({});
+    const [localPlayerChatBubble, setLocalPlayerChatBubble] = useState<{ message: string; timestamp: number } | null>(null);
+    const [chatInputFocused, setChatInputFocused] = useState(false);
     const [chatInput, setChatInput] = useState('');
     const [remoteStreams, setRemoteStreams] = useState<RemoteStream[]>([]);
     const [playerAnimations, setPlayerAnimations] = useState<Record<string, AnimationType>>({});
@@ -913,7 +1220,7 @@ function RoomPage() {
     ]);
     const [isIceConfigLoaded, setIsIceConfigLoaded] = useState(false);
 
-    // Memoize peerConnectionConfig to ensure it's stable and uses the latest iceServers
+// Memoize peerConnectionConfig to ensure it's stable and uses the latest iceServers
     const peerConnectionConfig = useMemo<RTCConfiguration>(() => {
         console.log('[CONFIG] Building peerConnectionConfig with', iceServers.length, 'ICE server groups');
         return {
@@ -928,6 +1235,11 @@ function RoomPage() {
     // ICE servers now come from backend via RoomState message
     // This ensures client and server use the same TURN servers
     // (Previously we fetched independently from Xirsys which could result in different servers)
+
+    // Keep remotePlayersRef in sync with state (for WebSocket handler closure)
+    useEffect(() => {
+        remotePlayersRef.current = remotePlayers;
+    }, [remotePlayers]);
 
     const audioAnalyzersRef = useRef<Map<string, AnalyserNode>>(new Map());
     const audioContextRef = useRef<AudioContext | null>(null);
@@ -994,6 +1306,7 @@ function RoomPage() {
         const eyeStyle = searchParams.get('eyeStyle') || 'dreary';
         const noseStyle = searchParams.get('noseStyle') || 'kitty_opt';
         const mouthStyle = searchParams.get('mouthStyle') || 'meow';
+        const characterType = searchParams.get('characterType') || 'cat';
 
         const params = new URLSearchParams({
             name,
@@ -1002,14 +1315,20 @@ function RoomPage() {
             eyeStyle,
             noseStyle,
             mouthStyle,
+            characterType,
         });
 
         // Use current hostname for WebSocket connection (works with ngrok)
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const host = window.location.host; // includes port if present
+        let host = window.location.host; // includes port if present
+
+        // If running in dev mode (port 3000), connect to backend on port 3001
+        if (host.includes(':3000')) {
+            host = host.replace(':3000', ':3001');
+        }
+
         const wsUrl = `${protocol}//${host}/stream?${params.toString()}`;
 
-        console.log('Connecting to WebSocket:', wsUrl);
         const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
@@ -1029,7 +1348,6 @@ function RoomPage() {
         };
 
         ws.onmessage = (event) => {
-            console.log('Received message:', event.data);
             const message = JSON.parse(event.data);
             handleMessage(message);
         };
@@ -1221,7 +1539,6 @@ function RoomPage() {
                         const streamPlayerId = publisherToPlayerRef.current.get(stream.publisherId);
                         return streamPlayerId !== leavingPlayerId;
                     });
-                    console.log(`Player ${leavingPlayerId} left, removed ${prev.length - filtered.length} streams`);
                     return filtered;
                 });
                 // Remove from screen sharing players
@@ -1261,6 +1578,27 @@ function RoomPage() {
 
             case 'ChatMessage':
                 setChatMessages((prev) => [...prev, { sender: message.sender, message: message.message }]);
+                // Add chat bubble for this player (use ref to avoid stale closure)
+                const senderPlayer = remotePlayersRef.current.find(p => p.name === message.sender);
+                if (senderPlayer) {
+                    const bubbleTimestamp = Date.now();
+                    setPlayerChatBubbles(prev => ({
+                        ...prev,
+                        [senderPlayer.id]: { message: message.message, timestamp: bubbleTimestamp }
+                    }));
+                    // Clear after 4 seconds
+                    setTimeout(() => {
+                        setPlayerChatBubbles(prev => {
+                            // Only delete if timestamp matches (not overwritten by newer message)
+                            if (prev[senderPlayer.id]?.timestamp === bubbleTimestamp) {
+                                const copy = { ...prev };
+                                delete copy[senderPlayer.id];
+                                return copy;
+                            }
+                            return prev;
+                        });
+                    }, 4000);
+                }
                 break;
 
             case 'Answer':
@@ -1400,7 +1738,6 @@ function RoomPage() {
                 break;
 
             case 'Unpublished':
-                console.log('Unpublished publisher:', message.publisherId);
                 subscribedIdsRef.current.delete(message.publisherId);
 
                 // Remove from screen sharing players if it was a video stream
@@ -1416,7 +1753,6 @@ function RoomPage() {
                     }
 
                     const filtered = prev.filter((s) => s.publisherId !== message.publisherId);
-                    console.log('Remote streams after unpublish:', filtered.length);
                     return filtered;
                 });
                 break;
@@ -1435,8 +1771,6 @@ function RoomPage() {
             const track = subscriber.track;
             const stream = new MediaStream([track]);
             const kind = track.kind as 'audio' | 'video';
-
-            console.log(`✅ Subscribed to ${kind} track`);
 
             // Start analyzing audio if this is an audio track
             if (kind === 'audio') {
@@ -1621,14 +1955,45 @@ function RoomPage() {
 
     const sendChat = () => {
         if (!wsRef.current || !chatInput.trim()) return;
-        wsRef.current.send(JSON.stringify({ action: 'ChatMessage', message: chatInput.trim() }));
+
+        const message = chatInput.trim();
+        wsRef.current.send(JSON.stringify({ action: 'ChatMessage', message }));
+
+        // Show chat bubble for local player
+        const bubbleTimestamp = Date.now();
+        setLocalPlayerChatBubble({ message, timestamp: bubbleTimestamp });
+
+        // Clear after 4 seconds (1s typing + 3s display)
+        setTimeout(() => {
+            setLocalPlayerChatBubble(prev => {
+                if (prev?.timestamp === bubbleTimestamp) {
+                    return null;
+                }
+                return prev;
+            });
+        }, 4000);
+
         setChatInput('');
     };
 
     const startStreaming = async () => {
         try {
-            setIsScreenSharing(true); // Show tablet immediately
+            // Check if mediaDevices API is available
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+                alert('Screen sharing is not supported. Please use HTTPS or localhost.');
+                return;
+            }
+
+            // Don't allow starting a new stream if already streaming
+            if (isScreenSharing || localStreamRef.current) {
+                console.log('Already streaming, ignoring start request');
+                return;
+            }
+
             const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+
+            // Only set state after successfully getting the stream
+            setIsScreenSharing(true);
             if (localVideoRef.current) localVideoRef.current.srcObject = stream;
             localStreamRef.current = stream;
 
@@ -1637,14 +2002,12 @@ function RoomPage() {
             if (videoTrack) {
                 const videoOnlyStream = new MediaStream([videoTrack]);
                 setLocalVideoStream(videoOnlyStream); // This triggers re-render with video stream
-                console.log('📺 Set local video stream for tablet display');
             }
 
             // Publish tracks
             if (publishTransportRef.current && wsRef.current) {
                 for (const track of stream.getTracks()) {
                     const publisher = await publishTransportRef.current.publish(track);
-                    console.log(`📤 Publishing ${track.kind} track`);
                     wsRef.current.send(JSON.stringify({ action: 'Offer', sdp: publisher.offer }));
                     wsRef.current.send(JSON.stringify({ action: 'Publish', publisherId: publisher.id }));
                     publisherIdsRef.current.push(publisher.id);
@@ -1652,8 +2015,8 @@ function RoomPage() {
             }
         } catch (error) {
             console.error('Error starting stream:', error);
-            setIsScreenSharing(false); // Hide tablet if error
-            setLocalVideoStream(undefined);
+            // Only clear state if we weren't already streaming
+            // (This prevents clearing state when user cancels the dialog while already streaming)
         }
     };
 
@@ -1674,6 +2037,11 @@ function RoomPage() {
     const startMicrophone = async () => {
         try {
             console.log('[MIC] Starting microphone...');
+            // Check if mediaDevices API is available
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                throw new Error('getUserMedia is not supported. Please use HTTPS or localhost.');
+            }
+
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             console.log('[MIC] Got media stream, tracks:', stream.getTracks().length);
             localAudioStreamRef.current = stream;
@@ -1810,7 +2178,6 @@ function RoomPage() {
 
         // Send StopPublish for all audio publisher IDs
         audioPublisherIdsRef.current.forEach((id) => {
-            console.log('Stopping audio publisher:', id);
             wsRef.current?.send(JSON.stringify({ action: 'StopPublish', publisherId: id }));
         });
 
@@ -1836,6 +2203,39 @@ function RoomPage() {
 
     const currentActivity = localPlayer?.activity || searchParams.get('activity') || '';
     const isCamping = currentActivity.toLowerCase().includes('camping');
+    const isCinema = currentActivity.toLowerCase().includes('watching') ||
+        currentActivity.toLowerCase().includes('movie') ||
+        currentActivity.toLowerCase().includes('judge') ||
+        currentActivity.toLowerCase().includes('judging');
+    const isCity = currentActivity.toLowerCase().includes('party') ||
+        currentActivity.toLowerCase().includes('city') ||
+        currentActivity.toLowerCase().includes('walking');
+
+    const isAtPodium = (pos: Position) => {
+        return Math.abs(pos.x - (-2)) < 0.5 &&
+            Math.abs(pos.y - 1) < 0.5 &&
+            Math.abs(pos.z - 4) < 0.5;
+    };
+
+    const podiumStream = useMemo(() => {
+        if (!isCinema) return null;
+
+        if (localPlayer && isAtPodium(localPlayer.position) && localVideoStream) {
+            return { stream: localVideoStream, name: localPlayer.name };
+        }
+
+        const remoteSpeaker = remotePlayers.find(p => {
+            if (!isAtPodium(p.position)) return false;
+            return remoteStreams.some(s => s.kind === 'video' && publisherToPlayerRef.current.get(s.publisherId) === p.id);
+        });
+
+        if (remoteSpeaker) {
+            const stream = remoteStreams.find(s => s.kind === 'video' && publisherToPlayerRef.current.get(s.publisherId) === remoteSpeaker.id)?.stream;
+            if (stream) return { stream, name: remoteSpeaker.name };
+        }
+
+        return null;
+    }, [isCinema, localPlayer, localVideoStream, remotePlayers, remoteStreams]);
 
     // Show loading screen while waiting for ICE servers
     if (!isIceConfigLoaded) {
@@ -1865,6 +2265,10 @@ function RoomPage() {
                         <pointLight position={[0, 4, 0]} intensity={108} />
                         {isCamping ? (
                             <SplatViewer url="/assets/final.ply" position={[-4, -1.2, -4]} rotation={[1, -.015, 0, 0]} scale={[4, 4, 4]} />
+                        ) : isCinema ? (
+                            <CinemaModel />
+                        ) : isCity ? (
+                            <CityModel />
                         ) : (
                             <>
                                 <RoomFloor />
@@ -1880,6 +2284,18 @@ function RoomPage() {
                                     isTalking={talkingPlayers.has(localPlayer.id)}
                                     videoStream={localVideoStream}
                                     isCamping={isCamping}
+                                    isCinema={isCinema}
+                                    hideTablet={!!podiumStream && localPlayer?.name === podiumStream.name}
+                                    chatInputFocused={chatInputFocused}
+                                    chatBubble={localPlayerChatBubble}
+                                />
+                            )}
+
+                            {/* Cinema Podium Screen */}
+                            {podiumStream && (
+                                <StreamingScreen
+                                    videoStream={podiumStream.stream}
+                                    isCinemaOverride={true}
                                 />
                             )}
 
@@ -1916,6 +2332,8 @@ function RoomPage() {
                                         videoStream={videoStream}
                                         localPlayerPosition={localPlayerPos}
                                         onTabletClick={videoStream ? () => setViewingStream({ stream: videoStream, playerName: player.name }) : undefined}
+                                        hideTablet={!!podiumStream && player.name === podiumStream.name}
+                                        chatBubble={playerChatBubbles[player.id]}
                                     />
                                 );
                             })}
@@ -1925,168 +2343,92 @@ function RoomPage() {
 
                     {/* Room info overlay */}
                     <div className="absolute top-4 left-4 bg-black/50 backdrop-blur-sm rounded-lg px-4 py-2">
-                    <h2 className="text-white font-bold">{roomTheme || 'Loading...'}</h2>
-                    <p className="text-gray-400 text-sm">{remotePlayers.length + 1} players</p>
-                    <p className="text-gray-500 text-xs mt-1">WASD to move</p>
+                        <h2 className="text-white font-bold">{roomTheme || 'Loading...'}</h2>
+                        <p className="text-gray-400 text-sm">{remotePlayers.length + 1} players</p>
+                        <p className="text-gray-500 text-xs mt-1">WASD to move</p>
+                        <p className="text-gray-500 text-xs mt-1">t to reset camera</p>
+                        <p className="text-gray-500 text-xs mt-1">f to go first person</p>
+                    </div>
+
+                    {/* Back button */}
+                    <a href="/" className="absolute top-4 right-4 text-gray-400 hover:text-white">
+                        ← Leave Room
+                    </a>
                 </div>
 
-                {/* Back button */}
-                <a href="/" className="absolute top-4 right-4 text-gray-400 hover:text-white">
-                    ← Leave Room
-                </a>
-            </div>
-
-            {/* Sidebar: Chat & Streams */}
-            <div className="w-80 bg-gray-800 flex flex-col border-l border-gray-700">
-                {/* Streams */}
-                <div className="p-3 border-b border-gray-700">
-                    <div className="flex gap-2 mb-2">
+                {/* Floating Controls (Screen Share / Mic) */}
+                <div className="absolute bottom-4 right-4 flex gap-2 z-20">
+                    <button
+                        onClick={startStreaming}
+                        className="py-2 px-4 bg-green-600 hover:bg-green-700 rounded text-sm text-white shadow-lg"
+                    >
+                        🎥 Share Screen
+                    </button>
+                    <button
+                        onClick={stopStreaming}
+                        className="py-2 px-4 bg-red-600 hover:bg-red-700 rounded text-sm text-white shadow-lg"
+                    >
+                        ⏹ Stop
+                    </button>
+                    {!isMicActive ? (
                         <button
-                            onClick={startStreaming}
-                            className="flex-1 py-2 bg-green-600 hover:bg-green-700 rounded text-sm text-white"
+                            onClick={startMicrophone}
+                            className="py-2 px-4 bg-blue-600 hover:bg-blue-700 rounded text-sm text-white shadow-lg"
                         >
-                            🎥 Share Screen
+                            🎤 Start Mic
                         </button>
-                        <button
-                            onClick={stopStreaming}
-                            className="flex-1 py-2 bg-red-600 hover:bg-red-700 rounded text-sm text-white"
-                        >
-                            ⏹ Stop
-                        </button>
-                    </div>
-
-                    {/* Microphone controls */}
-                    <div className="flex gap-2 mb-2">
-                        {!isMicActive ? (
+                    ) : (
+                        <>
                             <button
-                                onClick={startMicrophone}
-                                className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm text-white"
+                                onClick={toggleMicMute}
+                                className={`py-2 px-4 rounded text-sm text-white shadow-lg ${isMicMuted ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'}`}
                             >
-                                🎤 Start Mic
+                                {isMicMuted ? '🔇 Unmute' : '🎤 Mute'}
                             </button>
-                            ) : (
-                                <>
-                                    <button
-                                        onClick={toggleMicMute}
-                                        className={`flex-1 py-2 rounded text-sm text-white ${isMicMuted ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'
-                                            }`}
-                                    >
-                                        {isMicMuted ? '🔇 Unmute' : '🎤 Mute'}
-                                    </button>
-                                    <button
-                                        onClick={stopMicrophone}
-                                        className="flex-1 py-2 bg-red-600 hover:bg-red-700 rounded text-sm text-white"
-                                    >
-                                        ⏹ Stop Mic
-                                    </button>
-                                </>
-                            )}
-                        </div>
+                            <button
+                                onClick={stopMicrophone}
+                                className="py-2 px-4 bg-red-600 hover:bg-red-700 rounded text-sm text-white shadow-lg"
+                            >
+                                ⏹ Stop Mic
+                            </button>
+                        </>
+                    )}
+                </div>
 
-                        {/* Local player talking indicator */}
-                        {isMicActive && localPlayer && talkingPlayers.has(localPlayer.id) && !isMicMuted && (
-                            <div className="flex items-center gap-2 bg-blue-900/30 border border-blue-500/50 rounded px-2 py-1 mb-2">
-                                <div
-                                    className="w-4 h-4"
-                                    style={{
-                                        backgroundImage: 'url(/assets/textures/mic-talking-indicator_sprite_sheet.png)',
-                                        backgroundSize: '200% 100%',
-                                        animation: 'talkSprite 0.4s steps(2) infinite',
-                                    }}
-                                />
-                                <span className="text-blue-300 text-xs font-medium">You are talking</span>
-                            </div>
+                {/* Semi-transparent Chat Overlay */}
+                <div className="absolute top-20 right-4 w-72 max-h-96 bg-black/50 backdrop-blur-sm rounded-lg p-3 flex flex-col z-10">
+                    <h3 className="text-white font-semibold mb-2">Chat</h3>
+                    <div className="flex-1 overflow-y-auto space-y-1 max-h-60">
+                        {chatMessages.length === 0 ? (
+                            <p className="text-gray-400 text-sm">No messages yet...</p>
+                        ) : (
+                            chatMessages.slice(-20).map((msg, i) => (
+                                <div key={i} className="text-sm">
+                                    <span className="text-orange-400 font-medium">{msg.sender}:</span>{' '}
+                                    <span className="text-gray-300">{msg.message}</span>
+                                </div>
+                            ))
                         )}
-
-                        {/* Local stream */}
-                        <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-24 bg-black rounded mb-2" />
-
-                        {/* Remote video streams */}
-                        <div className="space-y-2 max-h-32 overflow-y-auto mb-2">
-                            {remoteStreams
-                                .filter((s) => s.kind === 'video')
-                                .map((remote) => (
-                                    <video
-                                        key={remote.publisherId}
-                                        autoPlay
-                                        playsInline
-                                        muted
-                                        className="w-full h-20 bg-black rounded"
-                                        ref={(el) => {
-                                            if (el && el.srcObject !== remote.stream) {
-                                                el.srcObject = remote.stream;
-                                            }
-                                        }}
-                                    />
-                                ))}
-                        </div>
-
-                        {/* Remote audio streams */}
-                        <div className="space-y-1">
-                            {remoteStreams
-                                .filter((s) => s.kind === 'audio')
-                                .map((remote) => {
-                                    const playerId = publisherToPlayerRef.current.get(remote.publisherId);
-                                    const player = remotePlayers.find((p) => p.id === playerId);
-                                    const isTalking = playerId ? talkingPlayers.has(playerId) : false;
-
-                                    return (
-                                        <div key={remote.publisherId} className="flex items-center gap-2 bg-gray-700 rounded px-2 py-1">
-                                            {isTalking ? (
-                                                <div
-                                                    className="w-4 h-4"
-                                                    style={{
-                                                        backgroundImage: 'url(/assets/textures/mic-talking-indicator_sprite_sheet.png)',
-                                                        backgroundSize: '200% 100%',
-                                                        animation: 'talkSprite 0.4s steps(2) infinite',
-                                                    }}
-                                                />
-                                            ) : (
-                                                <span className="text-gray-500 text-xs">🎤</span>
-                                            )}
-                                            <span className="text-gray-300 text-xs flex-1">
-                                                {player ? player.name : `Audio ${remote.publisherId.slice(0, 8)}`}
-                                            </span>
-                                            <span className="text-blue-400 text-xs">3D Audio</span>
-                                        </div>
-                                    );
-                                })}
-                        </div>
                     </div>
-
-                    {/* Chat */}
-                    <div className="flex-1 flex flex-col p-3 overflow-hidden">
-                        <h3 className="text-white font-semibold mb-2">Chat</h3>
-                        <div className="flex-1 overflow-y-auto bg-gray-900 rounded p-2 space-y-1">
-                            {chatMessages.length === 0 ? (
-                                <p className="text-gray-500 text-sm">No messages yet...</p>
-                            ) : (
-                                chatMessages.map((msg, i) => (
-                                    <div key={i} className="text-sm">
-                                        <span className="text-orange-400 font-medium">{msg.sender}:</span>{' '}
-                                        <span className="text-gray-300">{msg.message}</span>
-                                    </div>
-                                ))
-                            )}
-                        </div>
-                        <div className="flex gap-2 mt-2">
-                            <input
-                                type="text"
-                                value={chatInput}
-                                onChange={(e) => setChatInput(e.target.value)}
-                                onKeyDown={(e) => e.key === 'Enter' && sendChat()}
-                                disabled={!isConnected}
-                                placeholder="Type a message..."
-                                className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white text-sm placeholder-gray-400 disabled:opacity-50"
-                            />
-                            <button
-                                onClick={sendChat}
-                                disabled={!isConnected}
-                                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-white text-sm disabled:opacity-50"
-                            >
-                                Send
-                            </button>
-                        </div>
+                    <div className="flex gap-2 mt-2">
+                        <input
+                            type="text"
+                            value={chatInput}
+                            onChange={(e) => setChatInput(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && sendChat()}
+                            onFocus={() => setChatInputFocused(true)}
+                            onBlur={() => setChatInputFocused(false)}
+                            disabled={!isConnected}
+                            placeholder="Type a message..."
+                            className="flex-1 px-3 py-2 bg-gray-700/80 border border-gray-600 rounded text-white text-sm placeholder-gray-400 disabled:opacity-50"
+                        />
+                        <button
+                            onClick={sendChat}
+                            disabled={!isConnected}
+                            className="px-3 py-2 bg-blue-600 hover:bg-blue-700 rounded text-white text-sm disabled:opacity-50"
+                        >
+                            Send
+                        </button>
                     </div>
                 </div>
             </div>

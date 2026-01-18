@@ -23,6 +23,7 @@ interface FacialFeatures {
   eyeStyle: string;
   noseStyle: string;
   mouthStyle: string;
+  characterType: 'cat' | 'dog';
 }
 
 interface PlayerData {
@@ -32,17 +33,24 @@ interface PlayerData {
   facialFeatures: FacialFeatures;
 }
 
-// Available facial feature options
+// Available facial feature options per character type
 const FACIAL_OPTIONS = {
-  eyes: [
-    { id: 'dreary', label: 'Dreary' }
-  ],
-  nose: [
-    { id: 'kitty_opt', label: 'Kitty' }
-  ],
-  mouth: [
-    { id: 'meow', label: 'Meow' }
-  ]
+  cat: {
+    eyes: [{ id: 'dreary', label: 'Dreary' }],
+    nose: [{ id: 'kitty_opt', label: 'Kitty' }],
+    mouth: [{ id: 'meow', label: 'Meow' }]
+  },
+  dog: {
+    eyes: [
+      { id: 'dog_eye_1', label: 'Sweet' }
+    ],
+    nose: [
+      { id: 'dog_nose_1', label: 'Normal' },
+      { id: 'dog_nose_2', label: 'Wet' },
+      { id: 'dog_nose_3', label: 'Snoot' }
+    ],
+    mouth: [] // No dog mouth options yet
+  }
 };
 
 // 3D Cat Preview with facial textures
@@ -117,6 +125,63 @@ function CatPreview({ facialFeatures, color }: { facialFeatures: FacialFeatures;
   );
 }
 
+// 3D Dog Preview with facial textures
+function DogPreview({ facialFeatures, color }: { facialFeatures: FacialFeatures; color: string }) {
+  const { scene } = useGLTF('/assets/models/TWISTED_dog_character.glb');
+  const clone = useMemo(() => SkeletonUtils.clone(scene), [scene]);
+
+  // Load facial textures (dog uses different naming convention)
+  const eyeTexture = useTexture(
+    `/assets/textures/character_facial_textures/eyes/${facialFeatures.eyeStyle}.png`
+  );
+  const noseTexture = useTexture(
+    `/assets/textures/character_facial_textures/nose/${facialFeatures.noseStyle}.png`
+  );
+
+  eyeTexture.flipY = false;
+  noseTexture.flipY = false;
+
+  // Apply textures and colors to named meshes
+  useEffect(() => {
+    clone.traverse((child) => {
+      if (child instanceof THREE.Mesh) {
+        switch (child.name) {
+          case 'twisted_dog':
+            if (child.material instanceof THREE.MeshStandardMaterial) {
+              child.material.color.set(color);
+              child.material.needsUpdate = true;
+            }
+            break;
+          case 'twisted_dog_eyes_mesh':
+            if (child.material instanceof THREE.MeshStandardMaterial) {
+              child.material.map = eyeTexture;
+              child.material.transparent = true;
+              child.material.alphaTest = 0.1;
+              child.material.color.set(0xffffff);
+              child.material.needsUpdate = true;
+            }
+            break;
+          case 'twisted_dog_nose_mesh':
+            if (child.material instanceof THREE.MeshStandardMaterial) {
+              child.material.map = noseTexture;
+              child.material.transparent = true;
+              child.material.alphaTest = 0.1;
+              child.material.color.set(0xffffff);
+              child.material.needsUpdate = true;
+            }
+            break;
+        }
+      }
+    });
+  }, [clone, color, eyeTexture, noseTexture]);
+
+  return (
+    <group rotation={[0.2, 0.5, 0]}>
+      <primitive object={clone} scale={0.6} position={[0, -0.8, 0]} />
+    </group>
+  );
+}
+
 // Feature selector component
 function FeatureSelector({
   label,
@@ -139,11 +204,10 @@ function FeatureSelector({
           <button
             key={opt.id}
             onClick={() => onSelect(opt.id)}
-            className={`px-4 py-2 rounded-lg border transition ${
-              selected === opt.id
-                ? 'bg-orange-500 border-orange-500 text-white'
-                : 'bg-black/30 border-white/20 hover:border-white/40 text-gray-300'
-            }`}
+            className={`px-4 py-2 rounded-lg border transition ${selected === opt.id
+              ? 'bg-orange-500 border-orange-500 text-white'
+              : 'bg-black/30 border-white/20 hover:border-white/40 text-gray-300'
+              }`}
           >
             {opt.label}
           </button>
@@ -164,6 +228,7 @@ export default function Home() {
       eyeStyle: 'dreary',
       noseStyle: 'kitty_opt',
       mouthStyle: 'meow',
+      characterType: 'cat',
     },
   });
 
@@ -179,7 +244,12 @@ export default function Home() {
             eyeStyle: 'dreary',
             noseStyle: 'kitty_opt',
             mouthStyle: 'meow',
+            characterType: 'cat',
           };
+        }
+        // Add characterType if missing (migration)
+        if (!parsed.facialFeatures.characterType) {
+          parsed.facialFeatures.characterType = 'cat';
         }
         // Remove old shape field if present
         delete parsed.shape;
@@ -208,6 +278,7 @@ export default function Home() {
       eyeStyle: playerData.facialFeatures.eyeStyle,
       noseStyle: playerData.facialFeatures.noseStyle,
       mouthStyle: playerData.facialFeatures.mouthStyle,
+      characterType: playerData.facialFeatures.characterType,
     });
     router.push(`/room?${params.toString()}`);
   };
@@ -232,7 +303,11 @@ export default function Home() {
           <ambientLight intensity={0.6} />
           <pointLight position={[10, 10, 10]} intensity={1} />
           <pointLight position={[-10, -10, -10]} intensity={0.3} />
-          <CatPreview facialFeatures={playerData.facialFeatures} color={playerData.color} />
+          {playerData.facialFeatures.characterType === 'cat' ? (
+            <CatPreview facialFeatures={playerData.facialFeatures} color={playerData.color} />
+          ) : (
+            <DogPreview facialFeatures={playerData.facialFeatures} color={playerData.color} />
+          )}
         </Canvas>
       </div>
 
@@ -286,9 +361,8 @@ export default function Home() {
               <button
                 key={c}
                 onClick={() => setPlayerData({ ...playerData, color: c })}
-                className={`w-9 h-9 rounded-full border-2 transition ${
-                  playerData.color === c ? 'border-white scale-110' : 'border-transparent hover:scale-105'
-                }`}
+                className={`w-9 h-9 rounded-full border-2 transition ${playerData.color === c ? 'border-white scale-110' : 'border-transparent hover:scale-105'
+                  }`}
                 style={{ backgroundColor: c }}
               />
             ))}
@@ -298,13 +372,58 @@ export default function Home() {
         {/* Divider */}
         <div className="border-t border-white/10" />
 
+        {/* Character Type Selector */}
+        <div>
+          <label className="block text-sm font-medium text-gray-300 mb-2">Character</label>
+          <div className="flex gap-2">
+            <button
+              onClick={() => {
+                setPlayerData({
+                  ...playerData,
+                  facialFeatures: {
+                    eyeStyle: 'dreary',
+                    noseStyle: 'kitty_opt',
+                    mouthStyle: 'meow',
+                    characterType: 'cat',
+                  },
+                });
+              }}
+              className={`flex-1 py-3 rounded-lg border transition font-medium ${playerData.facialFeatures.characterType === 'cat'
+                ? 'bg-orange-500 border-orange-500 text-white'
+                : 'bg-black/30 border-white/20 hover:border-white/40 text-gray-300'
+                }`}
+            >
+              🐱 Cat
+            </button>
+            <button
+              onClick={() => {
+                setPlayerData({
+                  ...playerData,
+                  facialFeatures: {
+                    eyeStyle: 'dog_eye_1',
+                    noseStyle: 'dog_nose_1',
+                    mouthStyle: '',
+                    characterType: 'dog',
+                  },
+                });
+              }}
+              className={`flex-1 py-3 rounded-lg border transition font-medium ${playerData.facialFeatures.characterType === 'dog'
+                ? 'bg-orange-500 border-orange-500 text-white'
+                : 'bg-black/30 border-white/20 hover:border-white/40 text-gray-300'
+                }`}
+            >
+              🐶 Dog
+            </button>
+          </div>
+        </div>
+
         {/* Facial Features */}
         <div className="space-y-4">
           <h3 className="text-sm font-semibold text-gray-200 uppercase tracking-wider">Customize Face</h3>
 
           <FeatureSelector
             label="Eyes"
-            options={FACIAL_OPTIONS.eyes}
+            options={FACIAL_OPTIONS[playerData.facialFeatures.characterType].eyes}
             selected={playerData.facialFeatures.eyeStyle}
             onSelect={(id) => updateFacialFeature('eyeStyle', id)}
             featureType="eyes"
@@ -312,19 +431,21 @@ export default function Home() {
 
           <FeatureSelector
             label="Nose"
-            options={FACIAL_OPTIONS.nose}
+            options={FACIAL_OPTIONS[playerData.facialFeatures.characterType].nose}
             selected={playerData.facialFeatures.noseStyle}
             onSelect={(id) => updateFacialFeature('noseStyle', id)}
             featureType="nose"
           />
 
-          <FeatureSelector
-            label="Mouth"
-            options={FACIAL_OPTIONS.mouth}
-            selected={playerData.facialFeatures.mouthStyle}
-            onSelect={(id) => updateFacialFeature('mouthStyle', id)}
-            featureType="mouth"
-          />
+          {FACIAL_OPTIONS[playerData.facialFeatures.characterType].mouth.length > 0 && (
+            <FeatureSelector
+              label="Mouth"
+              options={FACIAL_OPTIONS[playerData.facialFeatures.characterType].mouth}
+              selected={playerData.facialFeatures.mouthStyle}
+              onSelect={(id) => updateFacialFeature('mouthStyle', id)}
+              featureType="mouth"
+            />
+          )}
         </div>
 
         {/* Join Button */}
@@ -339,5 +460,6 @@ export default function Home() {
   );
 }
 
-// Preload the cat model so it's ready immediately
+// Preload models so they're ready immediately
 useGLTF.preload('/assets/models/TWISTED_cat_character.glb');
+useGLTF.preload('/assets/models/TWISTED_dog_character.glb');

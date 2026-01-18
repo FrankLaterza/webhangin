@@ -1,7 +1,7 @@
 @echo off
 echo 🎨 Building frontend...
 cd frontend
-call npm run build
+call npm run build:static
 
 if %ERRORLEVEL% NEQ 0 (
     echo ❌ Frontend build failed!

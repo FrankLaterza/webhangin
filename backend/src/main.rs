@@ -26,6 +26,12 @@ struct PlayerJoinQuery {
     eye_style: String,
     nose_style: String,
     mouth_style: String,
+    #[serde(default = "default_character_type")]
+    character_type: String,
+}
+
+fn default_character_type() -> String {
+    "cat".to_string()
 }
 
 /// Map activity to themed room
@@ -39,6 +45,10 @@ fn activity_to_room(activity: &str) -> (&'static str, &'static str) {
         ("focus-den", "Focus Den")
     } else if activity_lower.contains("game") || activity_lower.contains("gaming") {
         ("gaming-corner", "Gaming Corner")
+    } else if activity_lower.contains("watching") || activity_lower.contains("movie") || activity_lower.contains("judge") || activity_lower.contains("judging") {
+        ("cinema", "Cinema")
+    } else if activity_lower.contains("party") || activity_lower.contains("city") || activity_lower.contains("walking") {
+        ("city", "City")
     } else {
         ("hangout-hub", "Hangout Hub")
     }
@@ -84,6 +94,7 @@ async fn websocket_handler(
             eye_style: query.eye_style.clone(),
             nose_style: query.nose_style.clone(),
             mouth_style: query.mouth_style.clone(),
+            character_type: query.character_type.clone(),
         },
         position: Default::default(),
         rotation: 0.0,
