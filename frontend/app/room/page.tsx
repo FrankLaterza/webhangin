@@ -1210,19 +1210,31 @@ function RoomPage() {
     const [localVideoStream, setLocalVideoStream] = useState<MediaStream | undefined>(undefined);
     const subscribeTransportReady = useRef<boolean>(false);
     const pendingSubscriptions = useRef<Array<{ publisherId: string, playerId: string }>>([]);
+    const [iceServers, setIceServers] = useState<RTCIceServer[]>([
+        { urls: [
+            'stun:stun.l.google.com:19302',
+            'stun:stun1.l.google.com:19302',
+            'stun:stun2.l.google.com:19302',
+            'stun:stun.cloudflare.com:3478'
+        ]},
+    ]);
+    const [isIceConfigLoaded, setIsIceConfigLoaded] = useState(false);
 
-    const peerConnectionConfig: RTCConfiguration = {
-        iceServers: [
-            {
-                urls: [
-                    'stun:stun.l.google.com:19302',
-                    'stun:stun1.l.google.com:19302',
-                    'stun:stun2.l.google.com:19302',
-                    'stun:stun.cloudflare.com:3478'
-                ]
-            },
-        ],
-    };
+// Memoize peerConnectionConfig to ensure it's stable and uses the latest iceServers
+    const peerConnectionConfig = useMemo<RTCConfiguration>(() => {
+        console.log('[CONFIG] Building peerConnectionConfig with', iceServers.length, 'ICE server groups');
+        return {
+            iceServers: iceServers,
+            iceCandidatePoolSize: 10, // Pre-gather candidates for faster connection
+            // CRITICAL: Force relay-only mode to bypass webrtc-rs DTLS/NAT issues
+            // All connections go through TURN server for reliable DTLS handshake
+            iceTransportPolicy: 'relay',
+        };
+    }, [iceServers]);
+
+    // ICE servers now come from backend via RoomState message
+    // This ensures client and server use the same TURN servers
+    // (Previously we fetched independently from Xirsys which could result in different servers)
 
     // Keep remotePlayersRef in sync with state (for WebSocket handler closure)
     useEffect(() => {
@@ -1285,6 +1297,7 @@ function RoomPage() {
         checkAudioLevel();
     };
 
+    // Connect to WebSocket immediately - ICE servers will come from RoomState message
     useEffect(() => {
         // Connect with player data from query params
         const name = searchParams.get('name') || 'Anonymous';
@@ -1320,10 +1333,9 @@ function RoomPage() {
         wsRef.current = ws;
 
         ws.onopen = () => {
-            console.log('Connected to server');
+            console.log('Connected to server, waiting for ICE servers from RoomState...');
             setIsConnected(true);
-            startPublishPeer();
-            startSubscribePeer();
+            // Don't start peers here - wait for ICE servers from RoomState
         };
 
         ws.onclose = () => {
@@ -1362,40 +1374,134 @@ function RoomPage() {
         };
     }, [searchParams]);
 
+    // Start WebRTC peers once we have ICE servers from backend
+    useEffect(() => {
+        if (isConnected && isIceConfigLoaded && wsRef.current) {
+            console.log('🚀 ICE servers received, starting WebRTC peers...');
+            console.log('🔧 ICE config:', JSON.stringify(peerConnectionConfig.iceServers?.map(s => ({ urls: s.urls, hasCredentials: !!s.credential }))));
+
+            // Verify we have ICE servers before starting
+            if (!peerConnectionConfig.iceServers || peerConnectionConfig.iceServers.length === 0) {
+                console.error('❌ No ICE servers in config! Waiting...');
+                return;
+            }
+
+            // Start publish transport first
+            startPublishPeer();
+
+            // Start subscribe transport with a small delay to avoid race conditions
+            // This ensures ICE gathering for publish transport doesn't interfere with subscribe
+            setTimeout(() => {
+                console.log('🚀 Starting subscribe peer after delay...');
+                startSubscribePeer();
+            }, 100);
+        }
+    }, [isConnected, isIceConfigLoaded, peerConnectionConfig]);
+
     const startPublishPeer = () => {
+        console.log('[PUBLISH] startPublishPeer called');
         if (!publishTransportRef.current && wsRef.current) {
+            console.log('[PUBLISH] Creating PublishTransport with config:', peerConnectionConfig);
             const publishTransport = new PublishTransport(peerConnectionConfig);
             publishTransportRef.current = publishTransport;
 
+            console.log('[PUBLISH] Sending PublisherInit to server');
             wsRef.current.send(JSON.stringify({ action: 'PublisherInit' }));
 
             publishTransport.on('icecandidate', (candidate) => {
+                console.log('[PUBLISH] ICE candidate:', candidate?.candidate?.slice(0, 80));
                 wsRef.current?.send(JSON.stringify({ action: 'PublisherIce', candidate }));
             });
 
             publishTransport.on('negotiationneeded', (offer) => {
+                console.log('[PUBLISH] Negotiation needed, sending Offer. SDP length:', offer?.sdp?.length);
                 wsRef.current?.send(JSON.stringify({ action: 'Offer', sdp: offer }));
             });
+
+            // Try to listen for connection events via rheomesh event emitter
+            publishTransport.on('connectionstatechange', (state: string) => {
+                console.log('[PUBLISH] Connection state (event):', state);
+            });
+            publishTransport.on('iceconnectionstatechange', (state: string) => {
+                console.log('[PUBLISH] ICE connection state (event):', state);
+                if (state === 'failed') {
+                    console.error('[PUBLISH] ❌ ICE connection FAILED!');
+                } else if (state === 'connected' || state === 'completed') {
+                    console.log('[PUBLISH] ✅ ICE connection established!');
+                }
+            });
+
+            console.log('[PUBLISH] PublishTransport setup complete');
+        } else {
+            console.log('[PUBLISH] Skipped - transport exists:', !!publishTransportRef.current, 'ws exists:', !!wsRef.current);
         }
     };
 
     const startSubscribePeer = () => {
+        console.log('[SUBSCRIBE] startSubscribePeer called');
         if (!subscribeTransportRef.current && wsRef.current) {
+            // Verify ICE servers are present
+            const iceServerCount = peerConnectionConfig.iceServers?.length || 0;
+            console.log('[SUBSCRIBE] Creating SubscribeTransport with', iceServerCount, 'ICE server groups');
+            if (iceServerCount === 0) {
+                console.error('[SUBSCRIBE] ❌ No ICE servers! This will cause connection issues.');
+            } else {
+                console.log('[SUBSCRIBE] ICE servers:', peerConnectionConfig.iceServers?.map(s => s.urls));
+            }
             const subscribeTransport = new SubscribeTransport(peerConnectionConfig);
             subscribeTransportRef.current = subscribeTransport;
 
+            console.log('[SUBSCRIBE] Sending SubscriberInit to server');
             wsRef.current.send(JSON.stringify({ action: 'SubscriberInit' }));
 
             subscribeTransport.on('icecandidate', (candidate) => {
+                console.log('[SUBSCRIBE] ICE candidate:', candidate?.candidate?.slice(0, 80));
                 wsRef.current?.send(JSON.stringify({ action: 'SubscriberIce', candidate }));
+            });
+
+            // Listen for connection state events via rheomesh event emitter
+            subscribeTransport.on('connectionstatechange', (state: string) => {
+                console.log('[SUBSCRIBE] Connection state (event):', state);
+                if (state === 'connected') {
+                    console.log('[SUBSCRIBE] ✅ Connection established!');
+                } else if (state === 'failed') {
+                    console.error('[SUBSCRIBE] ❌ Connection FAILED!');
+                }
+            });
+            subscribeTransport.on('iceconnectionstatechange', (state: string) => {
+                console.log('[SUBSCRIBE] ICE connection state (event):', state);
+                if (state === 'connected' || state === 'completed') {
+                    console.log('[SUBSCRIBE] ✅ ICE connection established!');
+                } else if (state === 'failed') {
+                    console.error('[SUBSCRIBE] ❌ ICE connection FAILED! Consider reconnecting.');
+                    // Mark that we need to recreate subscribe transport on next subscription attempt
+                    subscribeTransportReady.current = false;
+                } else if (state === 'disconnected') {
+                    console.warn('[SUBSCRIBE] ⚠️ ICE connection disconnected - may recover automatically');
+                }
+            });
+            subscribeTransport.on('track', (event: RTCTrackEvent) => {
+                console.log('[SUBSCRIBE] 🎵 Track event via rheomesh:', {
+                    kind: event.track.kind,
+                    id: event.track.id.slice(0, 12),
+                    muted: event.track.muted,
+                });
             });
 
             // Mark transport as ready immediately - it will negotiate when we subscribe
             subscribeTransportReady.current = true;
+            console.log('[SUBSCRIBE] SubscribeTransport setup complete, ready=true');
+        } else {
+            console.log('[SUBSCRIBE] Skipped - transport exists:', !!subscribeTransportRef.current, 'ws exists:', !!wsRef.current);
         }
     };
 
     const handleMessage = (message: any) => {
+        // Log all messages except Pong and PlayerMoved
+        if (message.action !== 'Pong' && message.action !== 'PlayerMoved') {
+            console.log('[WS IN]', message.action, message);
+        }
+
         switch (message.action) {
             case 'Pong':
                 break;
@@ -1411,6 +1517,13 @@ function RoomPage() {
                     setLocalPlayer(me);
                 }
                 setRemotePlayers(others);
+
+                // Use ICE servers from backend (ensures client and server use same TURN servers)
+                if (message.iceServers && message.iceServers.length > 0) {
+                    console.log('🌐 Received ICE servers from backend:', message.iceServers);
+                    setIceServers(message.iceServers);
+                    setIsIceConfigLoaded(true);
+                }
                 break;
 
             case 'PlayerJoined':
@@ -1486,39 +1599,100 @@ function RoomPage() {
                 break;
 
             case 'Answer':
+                console.log('[PUBLISH] Received Answer from server, SDP length:', message.sdp?.sdp?.length);
                 if (publishTransportRef.current) {
+                    console.log('[PUBLISH] Setting answer on publish transport...');
                     publishTransportRef.current.setAnswer(message.sdp);
+                    console.log('[PUBLISH] Answer set successfully');
+                } else {
+                    console.error('[PUBLISH] ERROR: No publish transport to set answer on!');
                 }
                 break;
 
             case 'Offer':
+                console.log('[SUBSCRIBE] Received Offer from server, SDP length:', message.sdp?.sdp?.length);
+                console.log('[SUBSCRIBE] Current pending subscriptions:', pendingSubscriptions.current.map(p => p.publisherId.slice(0, 8)));
+
+                // Parse SDP to extract media lines for debugging
+                const offerSdp = message.sdp?.sdp || '';
+                const mediaLines = offerSdp.split('\n').filter((line: string) => line.startsWith('m='));
+                console.log('[SUBSCRIBE] SDP media lines:', mediaLines);
+
+                // Count transceivers from a=mid lines
+                const midLines = offerSdp.split('\n').filter((line: string) => line.startsWith('a=mid:'));
+                console.log('[SUBSCRIBE] SDP mid lines:', midLines);
+
                 if (subscribeTransportRef.current) {
+                    const transport = subscribeTransportRef.current as any;
+                    console.log('[SUBSCRIBE] Transport state before setOffer:', {
+                        connectionState: transport.pc?.connectionState,
+                        iceConnectionState: transport.pc?.iceConnectionState,
+                        signalingState: transport.pc?.signalingState,
+                        transceiverCount: transport.pc?.getTransceivers?.()?.length,
+                    });
+
+                    console.log('[SUBSCRIBE] Setting offer on subscribe transport...');
                     subscribeTransportRef.current.setOffer(message.sdp).then((answer) => {
+                        console.log('[SUBSCRIBE] Answer generated, sending to server. SDP length:', answer?.sdp?.length);
+                        console.log('[SUBSCRIBE] Transport state after setOffer:', {
+                            connectionState: transport.pc?.connectionState,
+                            iceConnectionState: transport.pc?.iceConnectionState,
+                            signalingState: transport.pc?.signalingState,
+                            transceiverCount: transport.pc?.getTransceivers?.()?.length,
+                        });
+
+                        // Log Answer SDP details for debugging DTLS/ICE
+                        const answerSdp = answer?.sdp || '';
+                        const answerSetupLine = answerSdp.split('\n').find((line: string) => line.startsWith('a=setup:'));
+                        const answerFingerprintLine = answerSdp.split('\n').find((line: string) => line.startsWith('a=fingerprint:'));
+                        console.log('[SUBSCRIBE] Answer SDP key lines:', {
+                            setup: answerSetupLine?.trim(),
+                            fingerprint: answerFingerprintLine?.slice(0, 50)?.trim(),
+                        });
+
                         wsRef.current?.send(JSON.stringify({ action: 'Answer', sdp: answer }));
 
-                        // Process pending subscriptions (legacy - should not be needed anymore)
+                        // Process pending subscriptions AFTER Offer/Answer exchange
                         if (pendingSubscriptions.current.length > 0) {
                             const pending = [...pendingSubscriptions.current];
+                            console.log('[SUBSCRIBE] Processing', pending.length, 'pending subscriptions:', pending.map(p => p.publisherId.slice(0, 8)));
                             pendingSubscriptions.current = [];
-                            pending.forEach(({ publisherId }) => {
-                                subscribeToPublisher(publisherId);
-                            });
+
+                            // Small delay to ensure tracks are fully registered
+                            setTimeout(() => {
+                                console.log('[SUBSCRIBE] Now calling completeSubscription for', pending.length, 'publishers');
+                                pending.forEach(({ publisherId }) => {
+                                    console.log('[SUBSCRIBE] Completing subscription for:', publisherId);
+                                    completeSubscription(publisherId);
+                                });
+                            }, 100);
+                        } else {
+                            console.log('[SUBSCRIBE] No pending subscriptions to process after Offer');
                         }
+                    }).catch((err) => {
+                        console.error('[SUBSCRIBE] ERROR setting offer:', err);
+                        console.error('[SUBSCRIBE] Transport state on setOffer error:', {
+                            connectionState: transport.pc?.connectionState,
+                            iceConnectionState: transport.pc?.iceConnectionState,
+                        });
                     });
                 } else {
-                    console.error('❌ Cannot process Offer: subscribeTransport not initialized');
+                    console.error('[SUBSCRIBE] ERROR: subscribeTransport not initialized');
                 }
                 break;
 
             case 'PublisherIce':
+                console.log('[PUBLISH] Adding ICE candidate from server');
                 publishTransportRef.current?.addIceCandidate(message.candidate);
                 break;
 
             case 'SubscriberIce':
+                console.log('[SUBSCRIBE] Adding ICE candidate from server');
                 subscribeTransportRef.current?.addIceCandidate(message.candidate);
                 break;
 
             case 'Published':
+                console.log('[SUBSCRIBE] Published notification:', message.publisherIds.length, 'tracks from player', message.playerId);
                 message.publisherIds.forEach((publisherId: string) => {
                     // Map publisherId to playerId for talking indicator and stream association
                     if (message.playerId && message.playerId !== '') {
@@ -1529,25 +1703,35 @@ function RoomPage() {
                     const isOurPublisher = publisherIdsRef.current.includes(publisherId);
                     const alreadySubscribed = subscribedIdsRef.current.has(publisherId);
 
+                    console.log('[SUBSCRIBE] Publisher', publisherId.slice(0, 8), '- isOurs:', isOurPublisher, 'alreadySubscribed:', alreadySubscribed);
+
                     if (!isOurPublisher && !alreadySubscribed) {
                         subscribedIdsRef.current.add(publisherId);
 
-                        // Subscribe immediately (transport is always ready after init)
-                        if (subscribeTransportReady.current) {
-                            subscribeToPublisher(publisherId);
-                        } else {
-                            // Fallback queue (shouldn't happen)
-                            console.warn(`Transport not ready, queueing subscription for ${publisherId}`);
-                            pendingSubscriptions.current.push({
-                                publisherId,
-                                playerId: message.playerId || ''
-                            });
-                        }
+                        console.log('[SUBSCRIBE] Sending Subscribe request for:', publisherId);
+                        wsRef.current?.send(JSON.stringify({ action: 'Subscribe', publisherId }));
+
+                        // Queue the subscription to be processed after Offer is received
+                        pendingSubscriptions.current.push({
+                            publisherId,
+                            playerId: message.playerId || ''
+                        });
+                        console.log('[SUBSCRIBE] Queued subscription, pending count:', pendingSubscriptions.current.length);
                     }
                 });
                 break;
 
             case 'Subscribed':
+                break;
+
+            case 'SubscribeFailed':
+                console.warn(`⚠️ Failed to subscribe to ${message.publisherId}: ${message.error}`);
+                // Remove from subscribedIds so we can try again if Published is received again
+                subscribedIdsRef.current.delete(message.publisherId);
+                // Remove from pending subscriptions
+                pendingSubscriptions.current = pendingSubscriptions.current.filter(
+                    (p) => p.publisherId !== message.publisherId
+                );
                 break;
 
             case 'Unpublished':
@@ -1607,6 +1791,147 @@ function RoomPage() {
             });
         }).catch((error) => {
             console.error(`❌ Failed to subscribe:`, error);
+        });
+    };
+
+    // Complete a subscription by calling subscribe() on the transport
+    // This should be called AFTER the Offer/Answer exchange is complete
+    const completeSubscription = (publisherId: string) => {
+        const startTime = Date.now();
+        console.log('[SUBSCRIBE] completeSubscription called for:', publisherId, 'at', new Date().toISOString());
+
+        // Check if subscribe transport is available and ready
+        if (!subscribeTransportRef.current) {
+            console.error('[SUBSCRIBE] ERROR: Cannot complete subscription - transport not available');
+            return;
+        }
+
+        // Check if the transport's ICE connection failed - if so, try to recreate
+        const transport = subscribeTransportRef.current as any;
+        const iceState = transport.pc?.iceConnectionState;
+        if (iceState === 'failed' || iceState === 'closed') {
+            console.warn('[SUBSCRIBE] ⚠️ Transport ICE state is', iceState, '- recreating transport...');
+            subscribeTransportRef.current = null;
+            subscribeTransportReady.current = false;
+
+            // Recreate the subscribe transport
+            startSubscribePeer();
+
+            // Re-queue this subscription for after transport is ready
+            setTimeout(() => {
+                console.log('[SUBSCRIBE] Retrying subscription after transport recreation...');
+                completeSubscription(publisherId);
+            }, 500);
+            return;
+        }
+
+        // Log transport state before subscribing
+        console.log('[SUBSCRIBE] Transport state before subscribe:', {
+            pc: transport.pc ? 'exists' : 'null',
+            connectionState: transport.pc?.connectionState,
+            iceConnectionState: transport.pc?.iceConnectionState,
+            signalingState: transport.pc?.signalingState,
+            transceiverCount: transport.pc?.getTransceivers?.()?.length,
+        });
+
+        // Log existing transceivers to see what tracks are available
+        const transceivers = transport.pc?.getTransceivers?.() || [];
+        console.log('[SUBSCRIBE] Available transceivers before subscribe:', transceivers.length);
+        transceivers.forEach((t: RTCRtpTransceiver, i: number) => {
+            console.log(`[SUBSCRIBE]   Transceiver ${i}: mid=${t.mid}, direction=${t.direction}, receiver.track=${t.receiver?.track?.kind || 'none'}`);
+        });
+
+        console.log('[SUBSCRIBE] Calling subscribeTransport.subscribe()...');
+
+        // Add a timeout to detect if subscribe hangs
+        const timeoutId = setTimeout(() => {
+            console.error('[SUBSCRIBE] ⏰ TIMEOUT: subscribe() has not resolved after 10 seconds for', publisherId);
+        }, 10000);
+
+        subscribeTransportRef.current.subscribe(publisherId).then((subscriber) => {
+            const elapsed = Date.now() - startTime;
+            clearTimeout(timeoutId);
+            console.log(`[SUBSCRIBE] subscribe() resolved in ${elapsed}ms, got subscriber:`, subscriber);
+            const track = subscriber.track;
+            console.log('[SUBSCRIBE] Track details:', {
+                kind: track?.kind,
+                id: track?.id?.slice(0, 12),
+                readyState: track?.readyState,
+                enabled: track?.enabled,
+                muted: track?.muted,
+            });
+
+            // Add track event listeners for mute state changes
+            const trackId = track?.id?.slice(0, 12);
+            track.addEventListener('unmute', () => {
+                console.log(`[SUBSCRIBE] 🔊 Track ${trackId} UNMUTED - audio data is now flowing!`);
+            });
+            track.addEventListener('mute', () => {
+                console.log(`[SUBSCRIBE] 🔇 Track ${trackId} MUTED - audio data stopped flowing`);
+            });
+            track.addEventListener('ended', () => {
+                console.log(`[SUBSCRIBE] ⛔ Track ${trackId} ENDED`);
+            });
+
+            // If track is currently muted, set up a timeout to warn about it
+            if (track.muted) {
+                console.warn(`[SUBSCRIBE] ⚠️ Track ${trackId} is MUTED - waiting for audio data...`);
+                const unmuteTimeout = setTimeout(() => {
+                    if (track.muted) {
+                        console.error(`[SUBSCRIBE] ❌ Track ${trackId} still MUTED after 5 seconds - ICE may have failed`);
+                        console.error('[SUBSCRIBE] This usually means the WebRTC connection between browser and SFU failed');
+                    }
+                }, 5000);
+
+                // Clear timeout if track unmutes
+                track.addEventListener('unmute', () => clearTimeout(unmuteTimeout), { once: true });
+            }
+
+            const stream = new MediaStream([track]);
+            const kind = track.kind as 'audio' | 'video';
+
+            console.log(`[SUBSCRIBE] ✅ Successfully subscribed to ${kind} track from ${publisherId.slice(0, 8)} in ${elapsed}ms`);
+
+            // Start analyzing audio if this is an audio track
+            if (kind === 'audio') {
+                const playerId = publisherToPlayerRef.current.get(publisherId) || publisherId;
+                console.log('[SUBSCRIBE] Starting audio analysis for player:', playerId);
+                analyzeAudioLevel(playerId, stream);
+            }
+
+            // Track screen sharing players (for showing tablet immediately)
+            if (kind === 'video') {
+                const playerId = publisherToPlayerRef.current.get(publisherId);
+                if (playerId) {
+                    console.log('[SUBSCRIBE] Adding player to screen sharing:', playerId);
+                    setScreenSharingPlayers((prev) => new Set(prev).add(playerId));
+                }
+            }
+
+            setRemoteStreams((prev) => {
+                if (prev.some((s) => s.publisherId === publisherId)) {
+                    console.log('[SUBSCRIBE] Stream already exists, skipping');
+                    return prev;
+                }
+                console.log('[SUBSCRIBE] Adding stream to remoteStreams, total:', prev.length + 1);
+                return [...prev, { publisherId, stream, kind }];
+            });
+        }).catch((error) => {
+            const elapsed = Date.now() - startTime;
+            clearTimeout(timeoutId);
+            console.error(`[SUBSCRIBE] ❌ subscribe() failed for ${publisherId.slice(0, 8)} after ${elapsed}ms:`, error);
+            console.error('[SUBSCRIBE] Error details:', error?.message, error?.stack);
+            // Log transport state on error
+            console.error('[SUBSCRIBE] Transport state on error:', {
+                connectionState: transport.pc?.connectionState,
+                iceConnectionState: transport.pc?.iceConnectionState,
+            });
+            // Also log available transceivers to see what's available
+            const transOnError = transport.pc?.getTransceivers?.() || [];
+            console.error('[SUBSCRIBE] Transceivers on error:', transOnError.length);
+            transOnError.forEach((t: RTCRtpTransceiver, i: number) => {
+                console.error(`[SUBSCRIBE]   Transceiver ${i}: mid=${t.mid}, receiver.track=${t.receiver?.track?.kind || 'none'}`);
+            });
         });
     };
 
@@ -1708,39 +2033,134 @@ function RoomPage() {
 
     const startMicrophone = async () => {
         try {
+            console.log('[MIC] Starting microphone...');
             // Check if mediaDevices API is available
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
                 throw new Error('getUserMedia is not supported. Please use HTTPS or localhost.');
             }
 
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            console.log('[MIC] Got media stream, tracks:', stream.getTracks().length);
             localAudioStreamRef.current = stream;
             setIsMicActive(true);
             setIsMicMuted(false);
 
             // Start analyzing local audio for talking indicator
             if (localPlayer) {
+                console.log('[MIC] Starting audio analysis for local player:', localPlayer.id);
                 analyzeAudioLevel(localPlayer.id, stream);
             }
 
             // Wait for publish transport to be ready
             if (!publishTransportRef.current) {
-                console.error('PublishTransport not initialized');
+                console.error('[MIC] ERROR: PublishTransport not initialized!');
                 return;
             }
+            console.log('[MIC] PublishTransport is available');
+
+            // Publish audio track with retry logic for DTLS failures
+            const publishWithRetry = async (track: MediaStreamTrack, retryCount = 0): Promise<void> => {
+                const maxRetries = 2;
+                const connectionTimeout = 8000; // 8 seconds to establish connection
+
+                try {
+                    console.log(`[MIC] Publishing track (attempt ${retryCount + 1}):`, track.kind, track.id);
+                    const publisher = await publishTransportRef.current!.publish(track);
+                    console.log('[MIC] Publisher created:', publisher.id);
+
+                    console.log('[MIC] Sending Offer to server...');
+                    wsRef.current!.send(JSON.stringify({ action: 'Offer', sdp: publisher.offer }));
+
+                    console.log('[MIC] Sending Publish message for:', publisher.id);
+                    wsRef.current!.send(JSON.stringify({ action: 'Publish', publisherId: publisher.id }));
+
+                    // Monitor connection state - wait for peer connection to be established
+                    const pc = (publishTransportRef.current as any)?.pc as RTCPeerConnection | undefined;
+                    if (pc) {
+                        const startTime = Date.now();
+
+                        // Create a promise that resolves when connected or rejects on timeout/failure
+                        await new Promise<void>((resolve, reject) => {
+                            const checkState = () => {
+                                const state = pc.connectionState;
+                                console.log('[MIC] Checking connection state:', state);
+
+                                if (state === 'connected') {
+                                    console.log('[MIC] ✅ Peer connection established!');
+                                    resolve();
+                                } else if (state === 'failed') {
+                                    reject(new Error('Peer connection failed'));
+                                } else if (Date.now() - startTime > connectionTimeout) {
+                                    reject(new Error('Connection timeout'));
+                                } else if (state === 'connecting' || state === 'new') {
+                                    // Still connecting, check again
+                                    setTimeout(checkState, 500);
+                                } else {
+                                    // disconnected or closed
+                                    reject(new Error(`Unexpected state: ${state}`));
+                                }
+                            };
+
+                            // Start checking after a short delay for signaling
+                            setTimeout(checkState, 1000);
+                        });
+                    }
+
+                    audioPublisherIdsRef.current.push(publisher.id);
+                    publisherIdsRef.current.push(publisher.id);
+                    console.log('[MIC] Track published successfully, total publishers:', publisherIdsRef.current.length);
+                } catch (error) {
+                    console.error(`[MIC] Publish attempt ${retryCount + 1} failed:`, error);
+
+                    if (retryCount < maxRetries) {
+                        console.log('[MIC] 🔄 Retrying publish with fresh transport...');
+
+                        // Recreate the publish transport
+                        if (publishTransportRef.current) {
+                            try {
+                                // Close existing transport
+                                (publishTransportRef.current as any).close?.();
+                            } catch (e) {
+                                console.warn('[MIC] Error closing transport:', e);
+                            }
+                        }
+
+                        // Small delay before retry
+                        await new Promise(r => setTimeout(r, 1000));
+
+                        // Create new transport
+                        console.log('[MIC] Creating new PublishTransport...');
+                        const newTransport = new PublishTransport(peerConnectionConfig);
+                        publishTransportRef.current = newTransport;
+
+                        wsRef.current!.send(JSON.stringify({ action: 'PublisherInit' }));
+
+                        newTransport.on('icecandidate', (candidate) => {
+                            wsRef.current?.send(JSON.stringify({ action: 'PublisherIce', candidate }));
+                        });
+
+                        // Wait for transport to initialize
+                        await new Promise(r => setTimeout(r, 500));
+
+                        // Retry with new transport
+                        return publishWithRetry(track, retryCount + 1);
+                    } else {
+                        throw error;
+                    }
+                }
+            };
 
             // Publish audio track
             if (wsRef.current) {
+                console.log('[MIC] WebSocket is available, publishing tracks...');
                 for (const track of stream.getTracks()) {
-                    const publisher = await publishTransportRef.current.publish(track);
-                    wsRef.current.send(JSON.stringify({ action: 'Offer', sdp: publisher.offer }));
-                    wsRef.current.send(JSON.stringify({ action: 'Publish', publisherId: publisher.id }));
-                    audioPublisherIdsRef.current.push(publisher.id);
-                    publisherIdsRef.current.push(publisher.id);
+                    await publishWithRetry(track);
                 }
+            } else {
+                console.error('[MIC] ERROR: WebSocket not available!');
             }
         } catch (error) {
-            console.error('Error starting microphone:', error);
+            console.error('[MIC] Error starting microphone:', error);
         }
     };
 
@@ -1813,6 +2233,18 @@ function RoomPage() {
 
         return null;
     }, [isCinema, localPlayer, localVideoStream, remotePlayers, remoteStreams]);
+
+    // Show loading screen while waiting for ICE servers
+    if (!isIceConfigLoaded) {
+        return (
+            <div className="h-screen w-screen bg-gray-900 flex items-center justify-center text-white">
+                <div className="text-center">
+                    <div className="text-xl mb-2">Connecting...</div>
+                    <div className="text-sm text-gray-400">Loading connection servers</div>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <>

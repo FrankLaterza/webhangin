@@ -5,6 +5,7 @@ use tokio::sync::Mutex;
 use rheomesh::config::MediaConfig;
 use rheomesh::router::Router;
 use rheomesh::worker::Worker;
+use webrtc::ice_transport::ice_server::RTCIceServer;
 
 use super::handler::{PlayerData, Position};
 
@@ -136,17 +137,23 @@ where
 {
     rooms: HashMap<String, Arc<Room<T>>>,
     worker: Arc<Mutex<Worker>>,
+    ice_servers: Vec<RTCIceServer>,
 }
 
 impl<T> RoomOwner<T>
 where
     T: Actor,
 {
-    pub fn new(worker: Arc<Mutex<Worker>>) -> Self {
+    pub fn new(worker: Arc<Mutex<Worker>>, ice_servers: Vec<RTCIceServer>) -> Self {
         Self {
             rooms: HashMap::new(),
             worker,
+            ice_servers,
         }
+    }
+
+    pub fn get_ice_servers(&self) -> Vec<RTCIceServer> {
+        self.ice_servers.clone()
     }
 
     pub fn find_by_id(&self, room_id: String) -> Option<Arc<Room<T>>> {
