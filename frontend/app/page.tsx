@@ -42,10 +42,7 @@ const FACIAL_OPTIONS = {
   },
   dog: {
     eyes: [
-      { id: 'dog_eye_1', label: 'Sweet' },
-      { id: 'dog_eye_2', label: 'Alert' },
-      { id: 'dog_eye_3', label: 'Sleepy' },
-      { id: 'dog_eye_4', label: 'Happy' }
+      { id: 'dog_eye_1', label: 'Sweet' }
     ],
     nose: [
       { id: 'dog_nose_1', label: 'Normal' },
