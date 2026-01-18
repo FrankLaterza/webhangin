@@ -7,6 +7,7 @@ import { Text, Billboard, useTexture, useGLTF, useAnimations } from '@react-thre
 import { PublishTransport, SubscribeTransport } from 'rheomesh';
 import * as THREE from 'three';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+import { SplatViewer } from './SplatViewer';
 
 interface Position {
     x: number;
@@ -321,9 +322,9 @@ function LocalPlayer({
             setIsMoving(moved);
         }
 
-        // Clamp to room boundaries
-        positionRef.current.x = Math.max(-5, Math.min(5, positionRef.current.x));
-        positionRef.current.z = Math.max(-5, Math.min(5, positionRef.current.z));
+        // Clamp to room boundaries (Removed for Camp scene)
+        // positionRef.current.x = Math.max(-5, Math.min(5, positionRef.current.x));
+        // positionRef.current.z = Math.max(-5, Math.min(5, positionRef.current.z));
 
         // Continuous jump when spacebar is held
         if (keysPressed.current.has(' ') && !currentAnimation.current) {
@@ -697,8 +698,9 @@ export default function RoomPage() {
                 <Canvas>
                     <ambientLight intensity={0.4} />
                     <pointLight position={[0, 4, 0]} intensity={108} />
-                    <RoomFloor />
-                    <RoomWalls />
+                    {/* <RoomFloor /> */}
+                    {/* <RoomWalls /> */}
+                    <SplatViewer url="/assets/fixed.ply" position={[0, -1.8, 0]} rotation={[1, 0, 0, 0]} scale={[7, 7, 7]} />
                     <Suspense fallback={null}>
                         {localPlayer && (
                             <LocalPlayer player={localPlayer} onMove={handlePlayerMove} onAnimation={handleAnimation} />
