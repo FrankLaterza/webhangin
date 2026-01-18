@@ -13,6 +13,7 @@ import { SplatViewer } from './SplatViewer';
 import { AnimaleseChatBubble } from './AnimaleseChatBubble';
 import { PixelArtCanvas } from '../components/PixelArtCanvas';
 import { NineSliceBox, NineSliceButton, NineSliceLink } from '../components/NineSliceBox';
+import { BackgroundMusic } from './BackgroundMusic';
 
 // Load custom font
 const thinSans = localFont({
@@ -1428,6 +1429,15 @@ function CityModel() {
     return <primitive object={scene} scale={[.1, .1, .1]} position={[0, -1, 0]} name="collision-world" />;
 }
 
+// Background music playlist (defined outside component to prevent recreation on re-renders)
+const BACKGROUND_SONGS = [
+    { title: '10 PM', file: '/assets/songs/10 PM.mp3' },
+    { title: 'Financial Obligations', file: '/assets/songs/Financial Obligations.mp3' },
+    { title: '2 AM', file: '/assets/songs/2 AM.mp3' },
+    { title: "Dentist's Office", file: '/assets/songs/Dentist\'s Office.mp3' },
+    { title: '10 AM', file: '/assets/songs/10 AM.mp3' }
+];
+
 function RoomPage() {
     const searchParams = useSearchParams();
     const [isConnected, setIsConnected] = useState(false);
@@ -1461,6 +1471,8 @@ function RoomPage() {
     const [isMicMuted, setIsMicMuted] = useState(false);
     const [isScreenSharing, setIsScreenSharing] = useState(false);
     const [localVideoStream, setLocalVideoStream] = useState<MediaStream | undefined>(undefined);
+    const [musicVolume, setMusicVolume] = useState(0.1);
+    const [isMusicMuted, setIsMusicMuted] = useState(false);
     const subscribeTransportReady = useRef<boolean>(false);
     const publishTransportReady = useRef<boolean>(false);
     const pendingSubscriptions = useRef<Array<{ publisherId: string, playerId: string }>>([]);
@@ -2692,6 +2704,32 @@ function RoomPage() {
                     </NineSliceLink>
                 </div>
 
+                {/* Volume Control (Bottom Left) */}
+                <div className="absolute bottom-4 left-4 flex items-center gap-2 z-20">
+                    <NineSliceButton
+                        onClick={() => setIsMusicMuted(!isMusicMuted)}
+                        padding="6px 10px"
+                    >
+                        <span className="text-gray-700 text-xs font-bold">
+                            {isMusicMuted ? '🔇' : '🔊'}
+                        </span>
+                    </NineSliceButton>
+                    <NineSliceBox padding="8px 12px">
+                        <input
+                            type="range"
+                            min="0"
+                            max="100"
+                            value={musicVolume * 100}
+                            onChange={(e) => setMusicVolume(Number(e.target.value) / 100)}
+                            className="w-32 accent-orange-500"
+                            style={{ cursor: 'pointer' }}
+                        />
+                        <span className="text-gray-700 text-xs ml-2 font-mono">
+                            {Math.round(musicVolume * 100)}%
+                        </span>
+                    </NineSliceBox>
+                </div>
+
                 {/* Floating Controls (Screen Share / Mic) */}
                 <div className="absolute bottom-4 right-4 flex gap-2 z-20">
                     <NineSliceButton onClick={startStreaming} padding="6px 12px">
@@ -2786,6 +2824,9 @@ function RoomPage() {
                     </div>
                 </div>
             )}
+
+            {/* Background Music */}
+            <BackgroundMusic songs={BACKGROUND_SONGS} volume={isMusicMuted ? 0 : musicVolume} autoplay={true} />
         </>
     );
 }
