@@ -392,7 +392,7 @@ function AvatarMesh({
 }
 
 // Player avatar component with animation support
-function PlayerAvatar({ player, animation, isTalking, audioStream, videoStream, localPlayerPosition, onTabletClick, hideTablet }: { player: PlayerData; animation: AnimationType; isTalking?: boolean; audioStream?: MediaStream; videoStream?: MediaStream; localPlayerPosition?: THREE.Vector3; onTabletClick?: () => void; hideTablet?: boolean }) {
+function PlayerAvatar({ player, animation, isTalking, audioStream, videoStream, localPlayerPosition, onTabletClick, hideTablet, chatBubble }: { player: PlayerData; animation: AnimationType; isTalking?: boolean; audioStream?: MediaStream; videoStream?: MediaStream; localPlayerPosition?: THREE.Vector3; onTabletClick?: () => void; hideTablet?: boolean; chatBubble?: string }) {
     const groupRef = useRef<THREE.Group>(null);
     const { triggerAnimation, updateAnimation } = usePlayerAnimation();
     const micTexture = useTexture('/assets/textures/mic-talking-indicator_sprite_sheet.png');
@@ -475,6 +475,27 @@ function PlayerAvatar({ player, animation, isTalking, audioStream, videoStream, 
                 </Text>
             </Billboard>
 
+            {/* Chat Bubble */}
+            {chatBubble && (
+                <Billboard position={[0, 1.5, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
+                    <mesh renderOrder={999}>
+                        <planeGeometry args={[Math.min(chatBubble.length * 0.12 + 0.4, 3), 0.6]} />
+                        <meshBasicMaterial color="#222222" opacity={0.95} transparent depthWrite={false} />
+                    </mesh>
+                    <Text
+                        fontSize={0.18}
+                        color="white"
+                        anchorX="center"
+                        anchorY="middle"
+                        maxWidth={2.5}
+                        position={[0, 0, 0.01]}
+                        renderOrder={1000}
+                    >
+                        {chatBubble.length > 35 ? chatBubble.slice(0, 35) + '...' : chatBubble}
+                    </Text>
+                </Billboard>
+            )}
+
             {/* Spatial audio */}
             {audioStream && groupRef.current && localPlayerPosition && (
                 <SpatialAudio
@@ -498,7 +519,8 @@ function LocalPlayer({
     videoStream,
     isCamping,
     isCinema,
-    hideTablet
+    hideTablet,
+    chatInputFocused
 }: {
     player: PlayerData;
     onMove: (position: Position, rotation: number, isMoving: boolean) => void;
@@ -508,6 +530,7 @@ function LocalPlayer({
     isCamping?: boolean;
     isCinema?: boolean;
     hideTablet?: boolean;
+    chatInputFocused?: boolean;
 }) {
     const groupRef = useRef<THREE.Group>(null);
     const { camera, gl, scene } = useThree();
@@ -661,18 +684,12 @@ function LocalPlayer({
 
     useFrame((_, delta) => {
         if (!groupRef.current) return;
+        if (chatInputFocused) return; // Block movement while typing
 
         const speed = 5 * delta;
         const rotSpeed = 2 * delta;
         let moved = false;
 
-        // Position debug log (throttled to ~1 second)
-        const now = Date.now();
-        const lastLog = (window as any)._lastPosLog || 0;
-        if (now - lastLog > 1000) {
-            console.log('📍 Position:', positionRef.current);
-            (window as any)._lastPosLog = now;
-        }
 
         // W-tap injection
         if (initialInjection) {
@@ -1048,7 +1065,10 @@ function RoomPage() {
     const [roomTheme, setRoomTheme] = useState('');
     const [localPlayer, setLocalPlayer] = useState<PlayerData | null>(null);
     const [remotePlayers, setRemotePlayers] = useState<PlayerData[]>([]);
+    const remotePlayersRef = useRef<PlayerData[]>([]);
     const [chatMessages, setChatMessages] = useState<{ sender: string; message: string }[]>([]);
+    const [playerChatBubbles, setPlayerChatBubbles] = useState<{ [playerId: string]: { message: string; timestamp: number } }>({});
+    const [chatInputFocused, setChatInputFocused] = useState(false);
     const [chatInput, setChatInput] = useState('');
     const [remoteStreams, setRemoteStreams] = useState<RemoteStream[]>([]);
     const [playerAnimations, setPlayerAnimations] = useState<Record<string, AnimationType>>({});
@@ -1085,6 +1105,11 @@ function RoomPage() {
             },
         ],
     };
+
+    // Keep remotePlayersRef in sync with state (for WebSocket handler closure)
+    useEffect(() => {
+        remotePlayersRef.current = remotePlayers;
+    }, [remotePlayers]);
 
     const audioAnalyzersRef = useRef<Map<string, AnalyserNode>>(new Map());
     const audioContextRef = useRef<AudioContext | null>(null);
@@ -1327,7 +1352,32 @@ function RoomPage() {
                 break;
 
             case 'ChatMessage':
+                console.log('💬 ChatMessage received:', message.sender, message.message);
+                console.log('💬 Remote players (ref):', remotePlayersRef.current.map(p => p.name));
                 setChatMessages((prev) => [...prev, { sender: message.sender, message: message.message }]);
+                // Add chat bubble for this player (use ref to avoid stale closure)
+                const senderPlayer = remotePlayersRef.current.find(p => p.name === message.sender);
+                console.log('💬 Sender player found:', senderPlayer?.name, senderPlayer?.id);
+                if (senderPlayer) {
+                    const bubbleTimestamp = Date.now();
+                    console.log('💬 Setting bubble for player:', senderPlayer.id);
+                    setPlayerChatBubbles(prev => ({
+                        ...prev,
+                        [senderPlayer.id]: { message: message.message, timestamp: bubbleTimestamp }
+                    }));
+                    // Clear after 4 seconds
+                    setTimeout(() => {
+                        setPlayerChatBubbles(prev => {
+                            // Only delete if timestamp matches (not overwritten by newer message)
+                            if (prev[senderPlayer.id]?.timestamp === bubbleTimestamp) {
+                                const copy = { ...prev };
+                                delete copy[senderPlayer.id];
+                                return copy;
+                            }
+                            return prev;
+                        });
+                    }, 4000);
+                }
                 break;
 
             case 'Answer':
@@ -1670,6 +1720,7 @@ function RoomPage() {
                                     isCamping={isCamping}
                                     isCinema={isCinema}
                                     hideTablet={!!podiumStream && localPlayer?.name === podiumStream.name}
+                                    chatInputFocused={chatInputFocused}
                                 />
                             )}
 
@@ -1715,6 +1766,7 @@ function RoomPage() {
                                         localPlayerPosition={localPlayerPos}
                                         onTabletClick={videoStream ? () => setViewingStream({ stream: videoStream, playerName: player.name }) : undefined}
                                         hideTablet={!!podiumStream && player.name === podiumStream.name}
+                                        chatBubble={playerChatBubbles[player.id]?.message}
                                     />
                                 );
                             })}
@@ -1737,157 +1789,79 @@ function RoomPage() {
                     </a>
                 </div>
 
-                {/* Sidebar: Chat & Streams */}
-                <div className="w-80 bg-gray-800 flex flex-col border-l border-gray-700">
-                    {/* Streams */}
-                    <div className="p-3 border-b border-gray-700">
-                        <div className="flex gap-2 mb-2">
+                {/* Floating Controls (Screen Share / Mic) */}
+                <div className="absolute bottom-4 right-4 flex gap-2 z-20">
+                    <button
+                        onClick={startStreaming}
+                        className="py-2 px-4 bg-green-600 hover:bg-green-700 rounded text-sm text-white shadow-lg"
+                    >
+                        🎥 Share Screen
+                    </button>
+                    <button
+                        onClick={stopStreaming}
+                        className="py-2 px-4 bg-red-600 hover:bg-red-700 rounded text-sm text-white shadow-lg"
+                    >
+                        ⏹ Stop
+                    </button>
+                    {!isMicActive ? (
+                        <button
+                            onClick={startMicrophone}
+                            className="py-2 px-4 bg-blue-600 hover:bg-blue-700 rounded text-sm text-white shadow-lg"
+                        >
+                            🎤 Start Mic
+                        </button>
+                    ) : (
+                        <>
                             <button
-                                onClick={startStreaming}
-                                className="flex-1 py-2 bg-green-600 hover:bg-green-700 rounded text-sm text-white"
+                                onClick={toggleMicMute}
+                                className={`py-2 px-4 rounded text-sm text-white shadow-lg ${isMicMuted ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'}`}
                             >
-                                🎥 Share Screen
+                                {isMicMuted ? '🔇 Unmute' : '🎤 Mute'}
                             </button>
                             <button
-                                onClick={stopStreaming}
-                                className="flex-1 py-2 bg-red-600 hover:bg-red-700 rounded text-sm text-white"
+                                onClick={stopMicrophone}
+                                className="py-2 px-4 bg-red-600 hover:bg-red-700 rounded text-sm text-white shadow-lg"
                             >
-                                ⏹ Stop
+                                ⏹ Stop Mic
                             </button>
-                        </div>
+                        </>
+                    )}
+                </div>
 
-                        {/* Microphone controls */}
-                        <div className="flex gap-2 mb-2">
-                            {!isMicActive ? (
-                                <button
-                                    onClick={startMicrophone}
-                                    className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm text-white"
-                                >
-                                    🎤 Start Mic
-                                </button>
-                            ) : (
-                                <>
-                                    <button
-                                        onClick={toggleMicMute}
-                                        className={`flex-1 py-2 rounded text-sm text-white ${isMicMuted ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'
-                                            }`}
-                                    >
-                                        {isMicMuted ? '🔇 Unmute' : '🎤 Mute'}
-                                    </button>
-                                    <button
-                                        onClick={stopMicrophone}
-                                        className="flex-1 py-2 bg-red-600 hover:bg-red-700 rounded text-sm text-white"
-                                    >
-                                        ⏹ Stop Mic
-                                    </button>
-                                </>
-                            )}
-                        </div>
-
-                        {/* Local player talking indicator */}
-                        {isMicActive && localPlayer && talkingPlayers.has(localPlayer.id) && !isMicMuted && (
-                            <div className="flex items-center gap-2 bg-blue-900/30 border border-blue-500/50 rounded px-2 py-1 mb-2">
-                                <div
-                                    className="w-4 h-4"
-                                    style={{
-                                        backgroundImage: 'url(/assets/textures/mic-talking-indicator_sprite_sheet.png)',
-                                        backgroundSize: '200% 100%',
-                                        animation: 'talkSprite 0.4s steps(2) infinite',
-                                    }}
-                                />
-                                <span className="text-blue-300 text-xs font-medium">You are talking</span>
-                            </div>
+                {/* Semi-transparent Chat Overlay */}
+                <div className="absolute top-20 right-4 w-72 max-h-96 bg-black/50 backdrop-blur-sm rounded-lg p-3 flex flex-col z-10">
+                    <h3 className="text-white font-semibold mb-2">Chat</h3>
+                    <div className="flex-1 overflow-y-auto space-y-1 max-h-60">
+                        {chatMessages.length === 0 ? (
+                            <p className="text-gray-400 text-sm">No messages yet...</p>
+                        ) : (
+                            chatMessages.slice(-20).map((msg, i) => (
+                                <div key={i} className="text-sm">
+                                    <span className="text-orange-400 font-medium">{msg.sender}:</span>{' '}
+                                    <span className="text-gray-300">{msg.message}</span>
+                                </div>
+                            ))
                         )}
-
-                        {/* Local stream */}
-                        <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-24 bg-black rounded mb-2" />
-
-                        {/* Remote video streams */}
-                        <div className="space-y-2 max-h-32 overflow-y-auto mb-2">
-                            {remoteStreams
-                                .filter((s) => s.kind === 'video')
-                                .map((remote) => (
-                                    <video
-                                        key={remote.publisherId}
-                                        autoPlay
-                                        playsInline
-                                        muted
-                                        className="w-full h-20 bg-black rounded"
-                                        ref={(el) => {
-                                            if (el && el.srcObject !== remote.stream) {
-                                                el.srcObject = remote.stream;
-                                            }
-                                        }}
-                                    />
-                                ))}
-                        </div>
-
-                        {/* Remote audio streams */}
-                        <div className="space-y-1">
-                            {remoteStreams
-                                .filter((s) => s.kind === 'audio')
-                                .map((remote) => {
-                                    const playerId = publisherToPlayerRef.current.get(remote.publisherId);
-                                    const player = remotePlayers.find((p) => p.id === playerId);
-                                    const isTalking = playerId ? talkingPlayers.has(playerId) : false;
-
-                                    return (
-                                        <div key={remote.publisherId} className="flex items-center gap-2 bg-gray-700 rounded px-2 py-1">
-                                            {isTalking ? (
-                                                <div
-                                                    className="w-4 h-4"
-                                                    style={{
-                                                        backgroundImage: 'url(/assets/textures/mic-talking-indicator_sprite_sheet.png)',
-                                                        backgroundSize: '200% 100%',
-                                                        animation: 'talkSprite 0.4s steps(2) infinite',
-                                                    }}
-                                                />
-                                            ) : (
-                                                <span className="text-gray-500 text-xs">🎤</span>
-                                            )}
-                                            <span className="text-gray-300 text-xs flex-1">
-                                                {player ? player.name : `Audio ${remote.publisherId.slice(0, 8)}`}
-                                            </span>
-                                            <span className="text-blue-400 text-xs">3D Audio</span>
-                                        </div>
-                                    );
-                                })}
-                        </div>
                     </div>
-
-                    {/* Chat */}
-                    <div className="flex-1 flex flex-col p-3 overflow-hidden">
-                        <h3 className="text-white font-semibold mb-2">Chat</h3>
-                        <div className="flex-1 overflow-y-auto bg-gray-900 rounded p-2 space-y-1">
-                            {chatMessages.length === 0 ? (
-                                <p className="text-gray-500 text-sm">No messages yet...</p>
-                            ) : (
-                                chatMessages.map((msg, i) => (
-                                    <div key={i} className="text-sm">
-                                        <span className="text-orange-400 font-medium">{msg.sender}:</span>{' '}
-                                        <span className="text-gray-300">{msg.message}</span>
-                                    </div>
-                                ))
-                            )}
-                        </div>
-                        <div className="flex gap-2 mt-2">
-                            <input
-                                type="text"
-                                value={chatInput}
-                                onChange={(e) => setChatInput(e.target.value)}
-                                onKeyDown={(e) => e.key === 'Enter' && sendChat()}
-                                disabled={!isConnected}
-                                placeholder="Type a message..."
-                                className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white text-sm placeholder-gray-400 disabled:opacity-50"
-                            />
-                            <button
-                                onClick={sendChat}
-                                disabled={!isConnected}
-                                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-white text-sm disabled:opacity-50"
-                            >
-                                Send
-                            </button>
-                        </div>
+                    <div className="flex gap-2 mt-2">
+                        <input
+                            type="text"
+                            value={chatInput}
+                            onChange={(e) => setChatInput(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && sendChat()}
+                            onFocus={() => setChatInputFocused(true)}
+                            onBlur={() => setChatInputFocused(false)}
+                            disabled={!isConnected}
+                            placeholder="Type a message..."
+                            className="flex-1 px-3 py-2 bg-gray-700/80 border border-gray-600 rounded text-white text-sm placeholder-gray-400 disabled:opacity-50"
+                        />
+                        <button
+                            onClick={sendChat}
+                            disabled={!isConnected}
+                            className="px-3 py-2 bg-blue-600 hover:bg-blue-700 rounded text-white text-sm disabled:opacity-50"
+                        >
+                            Send
+                        </button>
                     </div>
                 </div>
             </div>
