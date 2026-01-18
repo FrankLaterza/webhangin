@@ -68,7 +68,16 @@ impl StreamingSession {
         let subscribe_transport;
         {
             let router = room.router.lock().await;
-            let config = rheomesh::config::WebRTCTransportConfig::default();
+            let mut config = rheomesh::config::WebRTCTransportConfig::default();
+            
+            // Configure Public IP if provided
+            if let Ok(ip_str) = std::env::var("PUBLIC_IP") {
+                 if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+                     tracing::info!("Using Public IP for WebRTC: {}", ip);
+                     config.announced_ips.push(ip);
+                 }
+            }
+            
             publish_transport = router.create_publish_transport(config.clone()).await;
             subscribe_transport = router.create_subscribe_transport(config).await;
         }
@@ -115,6 +124,27 @@ impl Actor for StreamingSession {
                 });
             }
         }
+
+        // Setup ICE Candidate forwarding
+        let publish_transport = self.publish_transport.clone();
+        let subscribe_transport = self.subscribe_transport.clone();
+        let addr = address.clone();
+
+        actix::spawn(async move {
+            let addr_clone = addr.clone();
+            publish_transport.on_ice_candidate(Box::new(move |candidate| {
+                if let Ok(json) = candidate.to_json() {
+                    addr_clone.do_send(SendingMessage::PublisherIce { candidate: json });
+                }
+            })).await;
+            
+            let addr_clone = addr.clone();
+            subscribe_transport.on_ice_candidate(Box::new(move |candidate| {
+                 if let Ok(json) = candidate.to_json() {
+                     addr_clone.do_send(SendingMessage::SubscriberIce { candidate: json });
+                 }
+            })).await;
+        });
     }
 
     fn stopped(&mut self, ctx: &mut Self::Context) {

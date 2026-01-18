@@ -1376,6 +1376,18 @@ function RoomPage() {
             publishTransport.on('negotiationneeded', (offer) => {
                 wsRef.current?.send(JSON.stringify({ action: 'Offer', sdp: offer }));
             });
+
+            // Connection Monitoring
+            publishTransport.on('connectionstatechange', (state) => {
+                console.log(`%c📡 [Publish] Connection State: ${state}`, 'color: #ff9900; font-weight: bold;');
+                if (state === 'failed') {
+                    console.error('❌ [Publish] Connection failed. Check network/ICE.');
+                }
+            });
+
+            publishTransport.on('icegatheringstatechange', (state) => {
+                console.log(`❄️ [Publish] ICE Gathering: ${state}`);
+            });
         }
     };
 
@@ -1388,6 +1400,15 @@ function RoomPage() {
 
             subscribeTransport.on('icecandidate', (candidate) => {
                 wsRef.current?.send(JSON.stringify({ action: 'SubscriberIce', candidate }));
+            });
+
+            // Connection Monitoring
+            subscribeTransport.on('connectionstatechange', (state) => {
+                console.log(`%c📡 [Subscribe] Connection State: ${state}`, 'color: #0099ff; font-weight: bold;');
+            });
+
+            subscribeTransport.on('icegatheringstatechange', (state) => {
+                console.log(`❄️ [Subscribe] ICE Gathering: ${state}`);
             });
 
             // Mark transport as ready immediately - it will negotiate when we subscribe
