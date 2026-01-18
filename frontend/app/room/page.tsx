@@ -8,6 +8,8 @@ import { PublishTransport, SubscribeTransport } from 'rheomesh';
 import * as THREE from 'three';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { SpatialAudio } from './SpatialAudio';
+import { SplatViewer } from './SplatViewer';
+import { RoomEffects } from './RoomEffects';
 
 interface Position {
     x: number;
@@ -238,7 +240,15 @@ function CatAvatar({
 }) {
     const { scene, animations } = useGLTF('/assets/models/TWISTED_cat_character.glb');
     // Clone scene using SkeletonUtils to properly handle SkinnedMeshes (animations)
-    const clone = useMemo(() => SkeletonUtils.clone(scene), [scene]);
+    const clone = useMemo(() => {
+        const c = SkeletonUtils.clone(scene);
+        c.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+                child.material = child.material.clone();
+            }
+        });
+        return c;
+    }, [scene]);
     const { actions, mixer } = useAnimations(animations, clone);
 
     // Load facial textures
@@ -441,16 +451,18 @@ function LocalPlayer({
     onMove,
     onAnimation,
     isTalking,
-    videoStream
+    videoStream,
+    isCamping
 }: {
     player: PlayerData;
     onMove: (position: Position, rotation: number, isMoving: boolean) => void;
     onAnimation: (animation: AnimationType) => void;
     isTalking?: boolean;
     videoStream?: MediaStream;
+    isCamping?: boolean;
 }) {
     const groupRef = useRef<THREE.Group>(null);
-    const { camera } = useThree();
+    const { camera, gl } = useThree();
     const keysPressed = useRef<Set<string>>(new Set());
     const positionRef = useRef<Position>({ ...player.position });
     const rotationRef = useRef<number>(player.rotation);
@@ -466,10 +478,90 @@ function LocalPlayer({
         }
     }, [micTexture]);
 
+    // Camera Orbit State
+    const cameraOffset = useRef({ azimuth: 0, elevation: 0, radius: 5 });
+    const isOrbiting = useRef(false);
+    const lastMouseRatio = useRef({ x: 0, y: 0 }); // Fallback if movementX fails? No, let's stick to movement
+    // Actually, manual diff is safer if movementX is acting up.
+    const lastMousePos = useRef({ x: 0, y: 0 });
+
+    // Mouse Listeners for Camera Orbit
+    useEffect(() => {
+        const domElement = gl.domElement;
+
+        const handlePointerDown = (e: PointerEvent) => {
+            if (e.button === 1) { // Middle Mouse
+                console.log('🖱️ Middle Mouse DOWN - Orbit Start');
+                isOrbiting.current = true;
+                e.preventDefault();
+                domElement.setPointerCapture(e.pointerId);
+                domElement.style.cursor = 'grabbing';
+                lastMousePos.current = { x: e.clientX, y: e.clientY };
+            }
+        };
+
+        const handlePointerUp = (e: PointerEvent) => {
+            if (e.button === 1) {
+                console.log('🖱️ Middle Mouse UP - Orbit End');
+                isOrbiting.current = false;
+                domElement.releasePointerCapture(e.pointerId);
+                domElement.style.cursor = 'auto';
+            }
+        };
+
+        const handlePointerMove = (e: PointerEvent) => {
+            if (!isOrbiting.current) return;
+            e.preventDefault();
+
+            // Calculate Delta Manually (safer across browsers/iframes)
+            const deltaX = e.clientX - lastMousePos.current.x;
+            const deltaY = e.clientY - lastMousePos.current.y;
+            lastMousePos.current = { x: e.clientX, y: e.clientY };
+
+            // console.log(`🖱️ Orbiting: dx=${deltaX}, dy=${deltaY}, az=${cameraOffset.current.azimuth.toFixed(2)}`);
+
+            // Adjust sensitivity
+            const sensitivity = 0.02;
+            cameraOffset.current.azimuth += deltaX * sensitivity;
+            cameraOffset.current.elevation += deltaY * sensitivity;
+
+            // Clamp elevation to avoid flipping (e.g., -80 to 80 degrees)
+            const limit = Math.PI / 2 - 0.1;
+            cameraOffset.current.elevation = Math.max(-limit, Math.min(limit, cameraOffset.current.elevation));
+        };
+
+        const handleWheel = (e: WheelEvent) => {
+            // Zoom
+            e.preventDefault();
+            const zoomSpeed = 0.005;
+            cameraOffset.current.radius += e.deltaY * zoomSpeed;
+            // Clamp radius
+            cameraOffset.current.radius = Math.max(2, Math.min(20, cameraOffset.current.radius));
+        };
+
+        domElement.addEventListener('pointerdown', handlePointerDown);
+        domElement.addEventListener('pointerup', handlePointerUp);
+        domElement.addEventListener('pointermove', handlePointerMove);
+        domElement.addEventListener('wheel', handleWheel, { passive: false });
+
+        return () => {
+            domElement.removeEventListener('pointerdown', handlePointerDown);
+            domElement.removeEventListener('pointerup', handlePointerUp);
+            domElement.removeEventListener('pointermove', handlePointerMove);
+            domElement.removeEventListener('wheel', handleWheel);
+            domElement.style.cursor = 'auto';
+        };
+    }, [gl]);
+
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             keysPressed.current.add(e.key.toLowerCase());
             if (e.key === ' ') keysPressed.current.add(' ');
+
+            // Reset Camera
+            if (e.key.toLowerCase() === 't') {
+                cameraOffset.current = { azimuth: 0, elevation: 0, radius: 5 };
+            }
         };
 
         const handleKeyUp = (e: KeyboardEvent) => {
@@ -559,9 +651,85 @@ function LocalPlayer({
             setIsMoving(moved);
         }
 
-        // Clamp to room boundaries
-        positionRef.current.x = Math.max(-5, Math.min(5, positionRef.current.x));
-        positionRef.current.z = Math.max(-5, Math.min(5, positionRef.current.z));
+        if (isCamping) {
+            // Invisible Platform / Terrain Logic (Quad / Rectangle)
+            // P1: -0.912, -10.64
+            // P2: -7.405, -8.84
+            // P3: -8.77, -13.07
+            // P4: -2.25, -14.779
+            const px = positionRef.current.x;
+            const pz = positionRef.current.z;
+
+            const p1 = { x: -0.912, z: -10.64 };
+            const p2 = { x: -7.405, z: -8.84 };
+            const p3 = { x: -8.77, z: -13.07 };
+            const p4 = { x: -2.25, z: -14.779 };
+
+            // Helper: Is point in triangle?
+            const pointInTri = (p: { x: number, z: number }, a: { x: number, z: number }, b: { x: number, z: number }, c: { x: number, z: number }) => {
+                const denom = ((b.z - c.z) * (a.x - c.x) + (c.x - b.x) * (a.z - c.z));
+                const w1 = ((b.z - c.z) * (p.x - c.x) + (c.x - b.x) * (p.z - c.z)) / denom;
+                const w2 = ((c.z - a.z) * (p.x - c.x) + (a.x - c.x) * (p.z - c.z)) / denom;
+                const w3 = 1 - w1 - w2;
+                return w1 >= 0 && w1 <= 1 && w2 >= 0 && w2 <= 1 && w3 >= 0 && w3 <= 1;
+            };
+
+            const pt = { x: px, z: pz };
+            // Check if inside P1-P2-P3 or P1-P3-P4
+            const inQuad = pointInTri(pt, p1, p2, p3) || pointInTri(pt, p1, p3, p4);
+
+            const targetY = inQuad ? 0.5 : 0;
+
+            // --- WALL LOGIC ---
+            // Block exit via P2-P3, P3-P4, P4-P1. Allow P1-P2.
+            // We only enforce this if we are "on the platform" (inQuad seems adequate coverage)
+            // Logic: Project point onto line defined by (A, B). If 'signed distance' indicates we are crossing OUT, snap back.
+            // Winding is CCW. "Inside" is Left. "Outside" is Right (< 0).
+            if (inQuad) {
+                const enforceWall = (a: { x: number, z: number }, b: { x: number, z: number }) => {
+                    // Vector AB
+                    const abX = b.x - a.x;
+                    const abZ = b.z - a.z;
+                    // Vector AP
+                    const apX = positionRef.current.x - a.x;
+                    const apZ = positionRef.current.z - a.z;
+
+                    // Cross Product (2D) to find signed distance/side
+                    // Val = (B.x - A.x) * (P.y - A.y) - (B.y - A.y) * (P.x - A.x)
+                    // HERE: x=x, y=z
+                    const det = abX * apZ - abZ * apX;
+
+                    // If det < 0, we are on the Right (Outside) for CCW winding.
+                    // Snap back to line.
+                    if (det < 0) {
+                        // Project P onto Line AB to find closest point
+                        // But simpler: just push perpendicular?
+                        // Let's just constrain 'det' to be 0 (on the line)
+                        // Or find the nearest point on segment AB and set pos to that.
+                        const t = ((positionRef.current.x - a.x) * abX + (positionRef.current.z - a.z) * abZ) / (abX * abX + abZ * abZ);
+                        // Clamp t to segment [0, 1]
+                        const tClamped = Math.max(0, Math.min(1, t));
+                        const closestX = a.x + tClamped * abX;
+                        const closestZ = a.z + tClamped * abZ;
+
+                        positionRef.current.x = closestX + (abZ * 0.01); // Nudge slightly inside? (Normal is -abZ, abX)
+                        positionRef.current.z = closestZ - (abX * 0.01);
+                    }
+                };
+
+                // Enforce 3 Walls
+                enforceWall(p2, p3);
+                enforceWall(p3, p4);
+                enforceWall(p4, p1);
+            }
+
+            // Smooth gravity/step-up
+            positionRef.current.y = THREE.MathUtils.lerp(positionRef.current.y, targetY, 0.2);
+        }
+
+        // Clamp to room boundaries (Removed for Camp scene)
+        // positionRef.current.x = Math.max(-5, Math.min(5, positionRef.current.x));
+        // positionRef.current.z = Math.max(-5, Math.min(5, positionRef.current.z));
 
         // Continuous jump when spacebar is held
         if (keysPressed.current.has(' ') && !currentAnimation.current) {
@@ -586,13 +754,24 @@ function LocalPlayer({
         );
         groupRef.current.rotation.y = rotationRef.current;
 
+        // --- CAMERA LOGIC ---
+        // Calculate orbit position
+        // Default: Behind player (rotationRef.current + PI)
+        // Offset: cameraOffset.current.azimuth
+        const totalAzimuth = rotationRef.current + Math.PI + cameraOffset.current.azimuth;
+        const totalElevation = cameraOffset.current.elevation;
+
+        // Spherical to Cartesian
+        // Radius = 5 (Dynamic)
+        const radius = cameraOffset.current.radius;
+        // y is Up.
+        const camX = positionRef.current.x + radius * Math.sin(totalAzimuth) * Math.cos(totalElevation);
+        const camZ = positionRef.current.z + radius * Math.cos(totalAzimuth) * Math.cos(totalElevation);
+        const camY = positionRef.current.y + 3 + heightOffset * 0.5 + (radius * Math.sin(totalElevation));
+
         // Update camera to follow
-        camera.position.set(
-            positionRef.current.x - Math.sin(rotationRef.current) * 5,
-            positionRef.current.y + 3 + heightOffset * 0.5,
-            positionRef.current.z - Math.cos(rotationRef.current) * 5
-        );
-        camera.lookAt(positionRef.current.x, positionRef.current.y + 0.5 + heightOffset, positionRef.current.z);
+        camera.position.set(camX, camY, camZ);
+        camera.lookAt(positionRef.current.x, positionRef.current.y + heightOffset, positionRef.current.z); // Look slightly higher
 
         // Animate sprite sheet if talking
         if (isTalking && micTexture) {
@@ -723,7 +902,7 @@ function RoomPage() {
     const [isScreenSharing, setIsScreenSharing] = useState(false);
     const [localVideoStream, setLocalVideoStream] = useState<MediaStream | undefined>(undefined);
     const subscribeTransportReady = useRef<boolean>(false);
-    const pendingSubscriptions = useRef<Array<{publisherId: string, playerId: string}>>([]);
+    const pendingSubscriptions = useRef<Array<{ publisherId: string, playerId: string }>>([]);
 
     const peerConnectionConfig: RTCConfiguration = {
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
@@ -1234,6 +1413,9 @@ function RoomPage() {
         }
     };
 
+    const currentActivity = localPlayer?.activity || searchParams.get('activity') || '';
+    const isCamping = currentActivity.toLowerCase().includes('camping');
+
     return (
         <>
             <style>{`
@@ -1244,63 +1426,72 @@ function RoomPage() {
             `}</style>
             <div className="h-screen w-screen bg-gray-900 flex">
                 {/* 3D Room */}
-            <div className="flex-1 relative">
-                <Canvas>
-                    <ambientLight intensity={0.4} />
-                    <pointLight position={[0, 4, 0]} intensity={108} />
-                    <RoomFloor />
-                    <RoomWalls />
-                    <Suspense fallback={null}>
-                        {localPlayer && (
-                            <LocalPlayer
-                                player={localPlayer}
-                                onMove={handlePlayerMove}
-                                onAnimation={handleAnimation}
-                                isTalking={talkingPlayers.has(localPlayer.id)}
-                                videoStream={localVideoStream}
-                            />
+                <div className="flex-1 relative">
+                    <Canvas>
+                        <ambientLight intensity={0.4} />
+                        <pointLight position={[0, 4, 0]} intensity={108} />
+                        {isCamping ? (
+                            <SplatViewer url="/assets/final.ply" position={[-4, -1.2, -4]} rotation={[1, -.015, 0, 0]} scale={[4, 4, 4]} />
+                        ) : (
+                            <>
+                                <RoomFloor />
+                                <RoomWalls />
+                            </>
                         )}
-                        {remotePlayers.map((player) => {
-                            // Check if this player is talking
-                            const isTalking = talkingPlayers.has(player.id);
-
-                            // Find audio stream for this player
-                            const audioStream = remoteStreams.find((stream) => {
-                                if (stream.kind !== 'audio') return false;
-                                const playerId = publisherToPlayerRef.current.get(stream.publisherId);
-                                return playerId === player.id;
-                            })?.stream;
-
-                            // Find video stream for this player
-                            const videoStream = remoteStreams.find((stream) => {
-                                if (stream.kind !== 'video') return false;
-                                const playerId = publisherToPlayerRef.current.get(stream.publisherId);
-                                return playerId === player.id;
-                            })?.stream;
-
-                            // Convert local player position to THREE.Vector3
-                            const localPlayerPos = localPlayer
-                                ? new THREE.Vector3(localPlayer.position.x, localPlayer.position.y, localPlayer.position.z)
-                                : undefined;
-
-                            return (
-                                <PlayerAvatar
-                                    key={player.id}
-                                    player={player}
-                                    animation={playerAnimations[player.id] || null}
-                                    isTalking={isTalking}
-                                    audioStream={audioStream}
-                                    videoStream={videoStream}
-                                    localPlayerPosition={localPlayerPos}
-                                    onTabletClick={videoStream ? () => setViewingStream({ stream: videoStream, playerName: player.name }) : undefined}
+                        <Suspense fallback={null}>
+                            {localPlayer && (
+                                <LocalPlayer
+                                    player={localPlayer}
+                                    onMove={handlePlayerMove}
+                                    onAnimation={handleAnimation}
+                                    isTalking={talkingPlayers.has(localPlayer.id)}
+                                    videoStream={localVideoStream}
+                                    isCamping={isCamping}
                                 />
-                            );
-                        })}
-                    </Suspense>
-                </Canvas>
+                            )}
 
-                {/* Room info overlay */}
-                <div className="absolute top-4 left-4 bg-black/50 backdrop-blur-sm rounded-lg px-4 py-2">
+                            {remotePlayers.map((player) => {
+                                // Check if this player is talking
+                                const isTalking = talkingPlayers.has(player.id);
+
+                                // Find audio stream for this player
+                                const audioStream = remoteStreams.find((stream) => {
+                                    if (stream.kind !== 'audio') return false;
+                                    const playerId = publisherToPlayerRef.current.get(stream.publisherId);
+                                    return playerId === player.id;
+                                })?.stream;
+
+                                // Find video stream for this player
+                                const videoStream = remoteStreams.find((stream) => {
+                                    if (stream.kind !== 'video') return false;
+                                    const playerId = publisherToPlayerRef.current.get(stream.publisherId);
+                                    return playerId === player.id;
+                                })?.stream;
+
+                                // Convert local player position to THREE.Vector3
+                                const localPlayerPos = localPlayer
+                                    ? new THREE.Vector3(localPlayer.position.x, localPlayer.position.y, localPlayer.position.z)
+                                    : undefined;
+
+                                return (
+                                    <PlayerAvatar
+                                        key={player.id}
+                                        player={player}
+                                        animation={playerAnimations[player.id] || null}
+                                        isTalking={isTalking}
+                                        audioStream={audioStream}
+                                        videoStream={videoStream}
+                                        localPlayerPosition={localPlayerPos}
+                                        onTabletClick={videoStream ? () => setViewingStream({ stream: videoStream, playerName: player.name }) : undefined}
+                                    />
+                                );
+                            })}
+                        </Suspense>
+                        <RoomEffects variant={isCamping ? 'camping' : 'default'} />
+                    </Canvas>
+
+                    {/* Room info overlay */}
+                    <div className="absolute top-4 left-4 bg-black/50 backdrop-blur-sm rounded-lg px-4 py-2">
                     <h2 className="text-white font-bold">{roomTheme || 'Loading...'}</h2>
                     <p className="text-gray-400 text-sm">{remotePlayers.length + 1} players</p>
                     <p className="text-gray-500 text-xs mt-1">WASD to move</p>
@@ -1340,165 +1531,164 @@ function RoomPage() {
                             >
                                 🎤 Start Mic
                             </button>
-                        ) : (
-                            <>
-                                <button
-                                    onClick={toggleMicMute}
-                                    className={`flex-1 py-2 rounded text-sm text-white ${
-                                        isMicMuted ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'
-                                    }`}
-                                >
-                                    {isMicMuted ? '🔇 Unmute' : '🎤 Mute'}
-                                </button>
-                                <button
-                                    onClick={stopMicrophone}
-                                    className="flex-1 py-2 bg-red-600 hover:bg-red-700 rounded text-sm text-white"
-                                >
-                                    ⏹ Stop Mic
-                                </button>
-                            </>
-                        )}
-                    </div>
-
-                    {/* Local player talking indicator */}
-                    {isMicActive && localPlayer && talkingPlayers.has(localPlayer.id) && !isMicMuted && (
-                        <div className="flex items-center gap-2 bg-blue-900/30 border border-blue-500/50 rounded px-2 py-1 mb-2">
-                            <div
-                                className="w-4 h-4"
-                                style={{
-                                    backgroundImage: 'url(/assets/textures/mic-talking-indicator_sprite_sheet.png)',
-                                    backgroundSize: '200% 100%',
-                                    animation: 'talkSprite 0.4s steps(2) infinite',
-                                }}
-                            />
-                            <span className="text-blue-300 text-xs font-medium">You are talking</span>
+                            ) : (
+                                <>
+                                    <button
+                                        onClick={toggleMicMute}
+                                        className={`flex-1 py-2 rounded text-sm text-white ${isMicMuted ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'
+                                            }`}
+                                    >
+                                        {isMicMuted ? '🔇 Unmute' : '🎤 Mute'}
+                                    </button>
+                                    <button
+                                        onClick={stopMicrophone}
+                                        className="flex-1 py-2 bg-red-600 hover:bg-red-700 rounded text-sm text-white"
+                                    >
+                                        ⏹ Stop Mic
+                                    </button>
+                                </>
+                            )}
                         </div>
-                    )}
 
-                    {/* Local stream */}
-                    <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-24 bg-black rounded mb-2" />
-
-                    {/* Remote video streams */}
-                    <div className="space-y-2 max-h-32 overflow-y-auto mb-2">
-                        {remoteStreams
-                            .filter((s) => s.kind === 'video')
-                            .map((remote) => (
-                                <video
-                                    key={remote.publisherId}
-                                    autoPlay
-                                    playsInline
-                                    muted
-                                    className="w-full h-20 bg-black rounded"
-                                    ref={(el) => {
-                                        if (el && el.srcObject !== remote.stream) {
-                                            el.srcObject = remote.stream;
-                                        }
+                        {/* Local player talking indicator */}
+                        {isMicActive && localPlayer && talkingPlayers.has(localPlayer.id) && !isMicMuted && (
+                            <div className="flex items-center gap-2 bg-blue-900/30 border border-blue-500/50 rounded px-2 py-1 mb-2">
+                                <div
+                                    className="w-4 h-4"
+                                    style={{
+                                        backgroundImage: 'url(/assets/textures/mic-talking-indicator_sprite_sheet.png)',
+                                        backgroundSize: '200% 100%',
+                                        animation: 'talkSprite 0.4s steps(2) infinite',
                                     }}
                                 />
-                            ))}
-                    </div>
-
-                    {/* Remote audio streams */}
-                    <div className="space-y-1">
-                        {remoteStreams
-                            .filter((s) => s.kind === 'audio')
-                            .map((remote) => {
-                                const playerId = publisherToPlayerRef.current.get(remote.publisherId);
-                                const player = remotePlayers.find((p) => p.id === playerId);
-                                const isTalking = playerId ? talkingPlayers.has(playerId) : false;
-
-                                return (
-                                    <div key={remote.publisherId} className="flex items-center gap-2 bg-gray-700 rounded px-2 py-1">
-                                        {isTalking ? (
-                                            <div
-                                                className="w-4 h-4"
-                                                style={{
-                                                    backgroundImage: 'url(/assets/textures/mic-talking-indicator_sprite_sheet.png)',
-                                                    backgroundSize: '200% 100%',
-                                                    animation: 'talkSprite 0.4s steps(2) infinite',
-                                                }}
-                                            />
-                                        ) : (
-                                            <span className="text-gray-500 text-xs">🎤</span>
-                                        )}
-                                        <span className="text-gray-300 text-xs flex-1">
-                                            {player ? player.name : `Audio ${remote.publisherId.slice(0, 8)}`}
-                                        </span>
-                                        <span className="text-blue-400 text-xs">3D Audio</span>
-                                    </div>
-                                );
-                            })}
-                    </div>
-                </div>
-
-                {/* Chat */}
-                <div className="flex-1 flex flex-col p-3 overflow-hidden">
-                    <h3 className="text-white font-semibold mb-2">Chat</h3>
-                    <div className="flex-1 overflow-y-auto bg-gray-900 rounded p-2 space-y-1">
-                        {chatMessages.length === 0 ? (
-                            <p className="text-gray-500 text-sm">No messages yet...</p>
-                        ) : (
-                            chatMessages.map((msg, i) => (
-                                <div key={i} className="text-sm">
-                                    <span className="text-orange-400 font-medium">{msg.sender}:</span>{' '}
-                                    <span className="text-gray-300">{msg.message}</span>
-                                </div>
-                            ))
+                                <span className="text-blue-300 text-xs font-medium">You are talking</span>
+                            </div>
                         )}
+
+                        {/* Local stream */}
+                        <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-24 bg-black rounded mb-2" />
+
+                        {/* Remote video streams */}
+                        <div className="space-y-2 max-h-32 overflow-y-auto mb-2">
+                            {remoteStreams
+                                .filter((s) => s.kind === 'video')
+                                .map((remote) => (
+                                    <video
+                                        key={remote.publisherId}
+                                        autoPlay
+                                        playsInline
+                                        muted
+                                        className="w-full h-20 bg-black rounded"
+                                        ref={(el) => {
+                                            if (el && el.srcObject !== remote.stream) {
+                                                el.srcObject = remote.stream;
+                                            }
+                                        }}
+                                    />
+                                ))}
+                        </div>
+
+                        {/* Remote audio streams */}
+                        <div className="space-y-1">
+                            {remoteStreams
+                                .filter((s) => s.kind === 'audio')
+                                .map((remote) => {
+                                    const playerId = publisherToPlayerRef.current.get(remote.publisherId);
+                                    const player = remotePlayers.find((p) => p.id === playerId);
+                                    const isTalking = playerId ? talkingPlayers.has(playerId) : false;
+
+                                    return (
+                                        <div key={remote.publisherId} className="flex items-center gap-2 bg-gray-700 rounded px-2 py-1">
+                                            {isTalking ? (
+                                                <div
+                                                    className="w-4 h-4"
+                                                    style={{
+                                                        backgroundImage: 'url(/assets/textures/mic-talking-indicator_sprite_sheet.png)',
+                                                        backgroundSize: '200% 100%',
+                                                        animation: 'talkSprite 0.4s steps(2) infinite',
+                                                    }}
+                                                />
+                                            ) : (
+                                                <span className="text-gray-500 text-xs">🎤</span>
+                                            )}
+                                            <span className="text-gray-300 text-xs flex-1">
+                                                {player ? player.name : `Audio ${remote.publisherId.slice(0, 8)}`}
+                                            </span>
+                                            <span className="text-blue-400 text-xs">3D Audio</span>
+                                        </div>
+                                    );
+                                })}
+                        </div>
                     </div>
-                    <div className="flex gap-2 mt-2">
-                        <input
-                            type="text"
-                            value={chatInput}
-                            onChange={(e) => setChatInput(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && sendChat()}
-                            disabled={!isConnected}
-                            placeholder="Type a message..."
-                            className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white text-sm placeholder-gray-400 disabled:opacity-50"
-                        />
+
+                    {/* Chat */}
+                    <div className="flex-1 flex flex-col p-3 overflow-hidden">
+                        <h3 className="text-white font-semibold mb-2">Chat</h3>
+                        <div className="flex-1 overflow-y-auto bg-gray-900 rounded p-2 space-y-1">
+                            {chatMessages.length === 0 ? (
+                                <p className="text-gray-500 text-sm">No messages yet...</p>
+                            ) : (
+                                chatMessages.map((msg, i) => (
+                                    <div key={i} className="text-sm">
+                                        <span className="text-orange-400 font-medium">{msg.sender}:</span>{' '}
+                                        <span className="text-gray-300">{msg.message}</span>
+                                    </div>
+                                ))
+                            )}
+                        </div>
+                        <div className="flex gap-2 mt-2">
+                            <input
+                                type="text"
+                                value={chatInput}
+                                onChange={(e) => setChatInput(e.target.value)}
+                                onKeyDown={(e) => e.key === 'Enter' && sendChat()}
+                                disabled={!isConnected}
+                                placeholder="Type a message..."
+                                className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white text-sm placeholder-gray-400 disabled:opacity-50"
+                            />
+                            <button
+                                onClick={sendChat}
+                                disabled={!isConnected}
+                                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-white text-sm disabled:opacity-50"
+                            >
+                                Send
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {/* Fullscreen Video Viewer */}
+            {viewingStream && (
+                <div className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center">
+                    <div className="relative w-full h-full max-w-7xl max-h-screen p-8">
+                        {/* Close button */}
                         <button
-                            onClick={sendChat}
-                            disabled={!isConnected}
-                            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-white text-sm disabled:opacity-50"
+                            onClick={() => setViewingStream(null)}
+                            className="absolute top-4 right-4 w-12 h-12 bg-red-600 hover:bg-red-700 rounded-full flex items-center justify-center text-white text-2xl font-bold z-10"
                         >
-                            Send
+                            ×
                         </button>
+
+                        {/* Player name */}
+                        <div className="absolute top-4 left-4 bg-black/50 backdrop-blur-sm rounded-lg px-4 py-2 z-10">
+                            <h3 className="text-white font-bold text-lg">{viewingStream.playerName}'s Screen</h3>
+                        </div>
+
+                        {/* Video */}
+                        <video
+                            autoPlay
+                            playsInline
+                            className="w-full h-full object-contain"
+                            ref={(el) => {
+                                if (el && el.srcObject !== viewingStream.stream) {
+                                    el.srcObject = viewingStream.stream;
+                                }
+                            }}
+                        />
                     </div>
                 </div>
-            </div>
-        </div>
-
-        {/* Fullscreen Video Viewer */}
-        {viewingStream && (
-            <div className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center">
-                <div className="relative w-full h-full max-w-7xl max-h-screen p-8">
-                    {/* Close button */}
-                    <button
-                        onClick={() => setViewingStream(null)}
-                        className="absolute top-4 right-4 w-12 h-12 bg-red-600 hover:bg-red-700 rounded-full flex items-center justify-center text-white text-2xl font-bold z-10"
-                    >
-                        ×
-                    </button>
-
-                    {/* Player name */}
-                    <div className="absolute top-4 left-4 bg-black/50 backdrop-blur-sm rounded-lg px-4 py-2 z-10">
-                        <h3 className="text-white font-bold text-lg">{viewingStream.playerName}'s Screen</h3>
-                    </div>
-
-                    {/* Video */}
-                    <video
-                        autoPlay
-                        playsInline
-                        className="w-full h-full object-contain"
-                        ref={(el) => {
-                            if (el && el.srcObject !== viewingStream.stream) {
-                                el.srcObject = viewingStream.stream;
-                            }
-                        }}
-                    />
-                </div>
-            </div>
-        )}
+            )}
         </>
     );
 }
