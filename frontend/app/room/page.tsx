@@ -975,6 +975,21 @@ function CinemaModel() {
     return <primitive object={scene} scale={[2, 2, 2]} position={[140, 0.5, 50]} name="collision-world" />;
 }
 
+// City Model
+function CityModel() {
+    const { scene } = useGLTF('/assets/city_at_night.glb');
+
+    useEffect(() => {
+        scene.traverse((c) => {
+            if (c instanceof THREE.Mesh) {
+                c.userData.isCollision = true;
+            }
+        });
+    }, [scene]);
+
+    return <primitive object={scene} scale={[.1, .1, .1]} position={[0, -1, 0]} name="collision-world" />;
+}
+
 function RoomPage() {
     const searchParams = useSearchParams();
     const [isConnected, setIsConnected] = useState(false);
@@ -1536,6 +1551,9 @@ function RoomPage() {
         currentActivity.toLowerCase().includes('movie') ||
         currentActivity.toLowerCase().includes('judge') ||
         currentActivity.toLowerCase().includes('judging');
+    const isCity = currentActivity.toLowerCase().includes('party') ||
+        currentActivity.toLowerCase().includes('city') ||
+        currentActivity.toLowerCase().includes('walking');
 
     return (
         <>
@@ -1555,6 +1573,8 @@ function RoomPage() {
                             <SplatViewer url="/assets/final.ply" position={[-4, -1.2, -4]} rotation={[1, -.015, 0, 0]} scale={[4, 4, 4]} />
                         ) : isCinema ? (
                             <CinemaModel />
+                        ) : isCity ? (
+                            <CityModel />
                         ) : (
                             <>
                                 <RoomFloor />
