@@ -1455,12 +1455,9 @@ function RoomPage() {
 
             case 'PlayerAnimation':
                 // Trigger animation for the player with the animation type
-                const animType = message.animation as AnimationType;
+                // Handle empty string as null
+                const animType = (message.animation || null) as AnimationType;
                 setPlayerAnimations((prev) => ({ ...prev, [message.playerId]: animType }));
-                // Auto-clear after animation duration
-                setTimeout(() => {
-                    setPlayerAnimations((prev) => ({ ...prev, [message.playerId]: null }));
-                }, 500);
                 break;
 
             case 'ChatMessage':
@@ -1623,9 +1620,9 @@ function RoomPage() {
     };
 
     const handleAnimation = (animation: AnimationType) => {
-        if (animation) {
-            wsRef.current?.send(JSON.stringify({ action: 'PlayAnimation', animation }));
-        }
+        // Send empty string for null to signal stop
+        const payload = animation || "";
+        wsRef.current?.send(JSON.stringify({ action: 'PlayAnimation', animation: payload }));
     };
 
     const sendChat = () => {
