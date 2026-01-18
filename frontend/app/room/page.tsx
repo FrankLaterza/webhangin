@@ -520,8 +520,13 @@ function LocalPlayer({
 
     return (
         <group ref={groupRef} position={[player.position.x, player.position.y, player.position.z]}>
-<<<<<<< Updated upstream
-            <AvatarMesh shape={player.shape} color={player.color} animation={activeAnimation} isMoving={isMoving} playerName={player.name} />
+            <AvatarMesh
+                facialFeatures={player.facialFeatures}
+                color={player.color}
+                animation={activeAnimation}
+                isMoving={isMoving}
+                playerName={player.name}
+            />
 
             {/* Talking indicator */}
             {isTalking && (
@@ -537,15 +542,6 @@ function LocalPlayer({
                 </Billboard>
             )}
 
-=======
-            <AvatarMesh
-                facialFeatures={player.facialFeatures}
-                color={player.color}
-                animation={activeAnimation}
-                isMoving={isMoving}
-                playerName={player.name}
-            />
->>>>>>> Stashed changes
             <Billboard position={[0, 1, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
                 <Text
                     fontSize={0.3}
@@ -702,17 +698,6 @@ function RoomPage() {
         const noseStyle = searchParams.get('noseStyle') || 'kitty_opt';
         const mouthStyle = searchParams.get('mouthStyle') || 'meow';
 
-<<<<<<< Updated upstream
-        const params = new URLSearchParams({ name, shape, color, activity });
-
-        // Use current hostname for WebSocket connection (works with ngrok)
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const host = window.location.host; // includes port if present
-        const wsUrl = `${protocol}//${host}/stream?${params.toString()}`;
-
-        console.log('Connecting to WebSocket:', wsUrl);
-        const ws = new WebSocket(wsUrl);
-=======
         const params = new URLSearchParams({
             name,
             color,
@@ -721,8 +706,14 @@ function RoomPage() {
             noseStyle,
             mouthStyle,
         });
-        const ws = new WebSocket(`ws://localhost:3001/stream?${params.toString()}`);
->>>>>>> Stashed changes
+
+        // Use current hostname for WebSocket connection (works with ngrok)
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const host = window.location.host; // includes port if present
+        const wsUrl = `${protocol}//${host}/stream?${params.toString()}`;
+
+        console.log('Connecting to WebSocket:', wsUrl);
+        const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
         ws.onopen = () => {
