@@ -1193,6 +1193,7 @@ function RoomPage() {
     const [talkingPlayers, setTalkingPlayers] = useState<Set<string>>(new Set());
     const [screenSharingPlayers, setScreenSharingPlayers] = useState<Set<string>>(new Set());
     const [viewingStream, setViewingStream] = useState<{ stream: MediaStream; playerName: string } | null>(null);
+    const [isPodiumActive, setIsPodiumActive] = useState(false); // Toggle with 'P' key
 
     const wsRef = useRef<WebSocket | null>(null);
     const publishTransportRef = useRef<PublishTransport | null>(null);
@@ -2283,21 +2284,34 @@ function RoomPage() {
         currentActivity.toLowerCase().includes('city') ||
         currentActivity.toLowerCase().includes('walking');
 
-    const isAtPodium = (pos: Position) => {
-        return Math.abs(pos.x - (-2)) < 0.5 &&
-            Math.abs(pos.y - 1) < 0.5 &&
-            Math.abs(pos.z - 4) < 0.5;
-    };
+    // Podium is now controlled by pressing 'P' key
+    const isAtPodium = () => isPodiumActive;
+
+    // Toggle podium mode with 'P' key
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'p' || e.key === 'P') {
+                // Don't toggle if typing in chat
+                if (chatInputFocused) return;
+                setIsPodiumActive(prev => {
+                    console.log('[PODIUM] Toggled:', !prev);
+                    return !prev;
+                });
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [chatInputFocused]);
 
     const podiumStream = useMemo(() => {
         if (!isCinema) return null;
 
-        if (localPlayer && isAtPodium(localPlayer.position) && localVideoStream) {
+        if (localPlayer && isAtPodium() && localVideoStream) {
             return { stream: localVideoStream, name: localPlayer.name };
         }
 
         const remoteSpeaker = remotePlayers.find(p => {
-            if (!isAtPodium(p.position)) return false;
+            // For remote players, check if they're screen sharing
             return remoteStreams.some(s => s.kind === 'video' && publisherToPlayerRef.current.get(s.publisherId) === p.id);
         });
 

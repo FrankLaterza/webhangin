@@ -317,12 +317,14 @@ impl Handler<ReceivedMessage> for StreamingSession {
                 address.do_send(SendingMessage::PublisherList { publishers });
             }
             ReceivedMessage::PublisherIce { candidate } => {
+                tracing::info!("[{}] PublisherIce received: {}", player_name, candidate.candidate.chars().take(60).collect::<String>());
                 let publish_transport = self.publish_transport.clone();
                 actix::spawn(async move {
                     let _ = publish_transport.add_ice_candidate(candidate).await;
                 });
             }
             ReceivedMessage::SubscriberIce { candidate } => {
+                tracing::info!("[{}] SubscriberIce received", player_name);
                 let subscribe_transport = self.subscribe_transport.clone();
                 actix::spawn(async move {
                     let _ = subscribe_transport.add_ice_candidate(candidate).await;
