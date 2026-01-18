@@ -7,11 +7,12 @@ import * as THREE from 'three';
 interface SpatialAudioProps {
     audioStream: MediaStream;
     targetPosition: THREE.Vector3; // Position of the audio source (player)
+    localPlayerPosition: THREE.Vector3; // Position of the local player (listener)
     playerId: string;
     soundRadius?: number; // Distance at which sound becomes silent
 }
 
-export function SpatialAudio({ audioStream, targetPosition, playerId, soundRadius = 20 }: SpatialAudioProps) {
+export function SpatialAudio({ audioStream, targetPosition, localPlayerPosition, playerId, soundRadius = 20 }: SpatialAudioProps) {
     const { camera } = useThree();
     const audioElementRef = useRef<HTMLAudioElement | null>(null);
 
@@ -50,10 +51,10 @@ export function SpatialAudio({ audioStream, targetPosition, playerId, soundRadiu
 
     // Update volume based on distance every frame
     useFrame(() => {
-        if (!audioElementRef.current || !targetPosition) return;
+        if (!audioElementRef.current || !targetPosition || !localPlayerPosition) return;
 
-        // Calculate distance between camera and audio source
-        const distance = camera.position.distanceTo(targetPosition);
+        // Calculate distance between local player and audio source (remote player)
+        const distance = localPlayerPosition.distanceTo(targetPosition);
 
         // Calculate volume based on distance
         let volume = 0;
@@ -69,9 +70,9 @@ export function SpatialAudio({ audioStream, targetPosition, playerId, soundRadiu
 
         // Detailed debug logging every 5 seconds
         if (Math.floor(Date.now() / 5000) !== Math.floor((Date.now() - 16) / 5000)) {
-            // Calculate direction vector from camera to player
+            // Calculate direction vector from local player to remote player
             const directionVector = new THREE.Vector3()
-                .subVectors(targetPosition, camera.position)
+                .subVectors(targetPosition, localPlayerPosition)
                 .normalize();
 
             // Get camera's forward direction (where it's looking)
@@ -94,15 +95,15 @@ export function SpatialAudio({ audioStream, targetPosition, playerId, soundRadiu
 
             console.log(`
 🎧 SPATIAL AUDIO DEBUG - Player: ${playerId.slice(0, 8)}
-├─ 📍 Distance: ${distance.toFixed(2)} units
+├─ 📍 Distance (Player-to-Player): ${distance.toFixed(2)} units
 ├─ 🔊 Calculated Volume: ${(volume * 100).toFixed(0)}%
 ├─ 🎚️  Previous Volume: ${(previousVolume * 100).toFixed(0)}%
 ├─ ✅ Actual Volume Set: ${(actualVolume * 100).toFixed(0)}%
 ├─ ⚠️  Volume Changed: ${previousVolume !== actualVolume ? 'YES' : 'NO'}
 ├─ 📐 Angle: ${angleDegrees.toFixed(0)}° (${relativePosition})
 ├─ 🧭 Direction: ${side}
-├─ 📌 Player Pos: (${targetPosition.x.toFixed(1)}, ${targetPosition.y.toFixed(1)}, ${targetPosition.z.toFixed(1)})
-├─ 👁️  Camera Pos: (${camera.position.x.toFixed(1)}, ${camera.position.y.toFixed(1)}, ${camera.position.z.toFixed(1)})
+├─ 📌 Remote Player Pos: (${targetPosition.x.toFixed(1)}, ${targetPosition.y.toFixed(1)}, ${targetPosition.z.toFixed(1)})
+├─ 👤 Local Player Pos: (${localPlayerPosition.x.toFixed(1)}, ${localPlayerPosition.y.toFixed(1)}, ${localPlayerPosition.z.toFixed(1)})
 ├─ 🎚️  Audio State: ${audioElementRef.current.paused ? '⏸️ PAUSED' : '▶️ PLAYING'}
 ├─ 🔇 Muted: ${audioElementRef.current.muted ? 'YES' : 'NO'}
 └─ 🆔 Audio Element ID: ${audioElementRef.current ? 'EXISTS' : 'NULL'}
