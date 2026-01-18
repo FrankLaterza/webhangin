@@ -191,9 +191,6 @@ function useCharacterAnimations(
     const currentAction = useRef<THREE.AnimationAction | null>(null);
 
     useEffect(() => {
-        console.log(`DEBUG [${playerName}]: Actions available:`, Object.keys(actions));
-        console.log(`DEBUG [${playerName}]: State:`, { animation, isMoving });
-
         const fadeTime = 0.2;
         let nextAction: THREE.AnimationAction | null = null;
         let nextFadeTime = fadeTime;
@@ -202,7 +199,6 @@ function useCharacterAnimations(
         // Priority: Jump (One-shot) > Move (Loop) > Idle (Loop)
 
         if (animation === 'jump') {
-            console.log('🐈 Animation: JUMP');
             if (currentAction.current) {
                 currentAction.current.fadeOut(0.05); // Faster fade out for jump
                 currentAction.current = null;
@@ -232,12 +228,6 @@ function useCharacterAnimations(
                 nextAction?.reset().play();
                 // Force mixer to update immediately to apply pose
                 mixer.update(0);
-            }
-
-            // Logging
-            if (nextAction) {
-                if (isMoving) console.log(`🐈 Animation: WALK (Snap: ${!currentAction.current})`);
-                else console.log(`🐈 Animation: IDLE (Snap: ${!currentAction.current})`);
             }
 
             currentAction.current = nextAction;
@@ -292,10 +282,8 @@ function CatAvatar({
 
     // Apply textures and colors to named meshes
     useEffect(() => {
-        console.log('Traversing clone for facial meshes...');
         clone.traverse((child) => {
             if (child instanceof THREE.Mesh) {
-                console.log('Found mesh:', child.name, 'Material type:', child.material.constructor.name);
                 switch (child.name) {
                     case 'twisted_cat':
                         // Apply fur color to body mesh
@@ -305,7 +293,6 @@ function CatAvatar({
                         }
                         break;
                     case 'twisted_cat_eyes_mesh':
-                        console.log('Applying eye texture to:', child.name);
                         if (child.material instanceof THREE.MeshStandardMaterial) {
                             child.material.map = eyeTexture;
                             child.material.transparent = true;
@@ -315,7 +302,6 @@ function CatAvatar({
                         }
                         break;
                     case 'twisted_cat_nose_mesh':
-                        console.log('Applying nose texture to:', child.name);
                         if (child.material instanceof THREE.MeshStandardMaterial) {
                             child.material.map = noseTexture;
                             child.material.transparent = true;
@@ -325,7 +311,6 @@ function CatAvatar({
                         }
                         break;
                     case 'twisted_cat_mouth_mesh':
-                        console.log('Applying mouth texture to:', child.name);
                         if (child.material instanceof THREE.MeshStandardMaterial) {
                             child.material.map = mouthTexture;
                             child.material.transparent = true;
@@ -562,7 +547,6 @@ function LocalPlayer({
 
         const handlePointerDown = (e: PointerEvent) => {
             if (e.button === 1) { // Middle Mouse
-                console.log('🖱️ Middle Mouse DOWN - Orbit Start');
                 isOrbiting.current = true;
                 e.preventDefault();
                 domElement.setPointerCapture(e.pointerId);
@@ -573,7 +557,6 @@ function LocalPlayer({
 
         const handlePointerUp = (e: PointerEvent) => {
             if (e.button === 1) {
-                console.log('🖱️ Middle Mouse UP - Orbit End');
                 isOrbiting.current = false;
                 domElement.releasePointerCapture(e.pointerId);
                 domElement.style.cursor = 'auto';
@@ -1196,7 +1179,6 @@ function RoomPage() {
 
         const wsUrl = `${protocol}//${host}/stream?${params.toString()}`;
 
-        console.log('Connecting to WebSocket:', wsUrl);
         const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
@@ -1217,7 +1199,6 @@ function RoomPage() {
         };
 
         ws.onmessage = (event) => {
-            console.log('Received message:', event.data);
             const message = JSON.parse(event.data);
             handleMessage(message);
         };
@@ -1278,11 +1259,6 @@ function RoomPage() {
     };
 
     const handleMessage = (message: any) => {
-        // Only log non-Pong messages to reduce console spam
-        if (message.action !== 'Pong') {
-            console.log('Received:', message.action);
-        }
-
         switch (message.action) {
             case 'Pong':
                 break;
@@ -1313,7 +1289,6 @@ function RoomPage() {
                         const streamPlayerId = publisherToPlayerRef.current.get(stream.publisherId);
                         return streamPlayerId !== leavingPlayerId;
                     });
-                    console.log(`Player ${leavingPlayerId} left, removed ${prev.length - filtered.length} streams`);
                     return filtered;
                 });
                 // Remove from screen sharing players
@@ -1352,15 +1327,11 @@ function RoomPage() {
                 break;
 
             case 'ChatMessage':
-                console.log('💬 ChatMessage received:', message.sender, message.message);
-                console.log('💬 Remote players (ref):', remotePlayersRef.current.map(p => p.name));
                 setChatMessages((prev) => [...prev, { sender: message.sender, message: message.message }]);
                 // Add chat bubble for this player (use ref to avoid stale closure)
                 const senderPlayer = remotePlayersRef.current.find(p => p.name === message.sender);
-                console.log('💬 Sender player found:', senderPlayer?.name, senderPlayer?.id);
                 if (senderPlayer) {
                     const bubbleTimestamp = Date.now();
-                    console.log('💬 Setting bubble for player:', senderPlayer.id);
                     setPlayerChatBubbles(prev => ({
                         ...prev,
                         [senderPlayer.id]: { message: message.message, timestamp: bubbleTimestamp }
@@ -1446,7 +1417,6 @@ function RoomPage() {
                 break;
 
             case 'Unpublished':
-                console.log('Unpublished publisher:', message.publisherId);
                 subscribedIdsRef.current.delete(message.publisherId);
 
                 // Remove from screen sharing players if it was a video stream
@@ -1462,7 +1432,6 @@ function RoomPage() {
                     }
 
                     const filtered = prev.filter((s) => s.publisherId !== message.publisherId);
-                    console.log('Remote streams after unpublish:', filtered.length);
                     return filtered;
                 });
                 break;
@@ -1481,8 +1450,6 @@ function RoomPage() {
             const track = subscriber.track;
             const stream = new MediaStream([track]);
             const kind = track.kind as 'audio' | 'video';
-
-            console.log(`✅ Subscribed to ${kind} track`);
 
             // Start analyzing audio if this is an audio track
             if (kind === 'audio') {
@@ -1548,14 +1515,12 @@ function RoomPage() {
             if (videoTrack) {
                 const videoOnlyStream = new MediaStream([videoTrack]);
                 setLocalVideoStream(videoOnlyStream); // This triggers re-render with video stream
-                console.log('📺 Set local video stream for tablet display');
             }
 
             // Publish tracks
             if (publishTransportRef.current && wsRef.current) {
                 for (const track of stream.getTracks()) {
                     const publisher = await publishTransportRef.current.publish(track);
-                    console.log(`📤 Publishing ${track.kind} track`);
                     wsRef.current.send(JSON.stringify({ action: 'Offer', sdp: publisher.offer }));
                     wsRef.current.send(JSON.stringify({ action: 'Publish', publisherId: publisher.id }));
                     publisherIdsRef.current.push(publisher.id);
@@ -1584,8 +1549,6 @@ function RoomPage() {
 
     const startMicrophone = async () => {
         try {
-            console.log('Starting microphone...');
-
             // Check if mediaDevices API is available
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
                 throw new Error('getUserMedia is not supported. Please use HTTPS or localhost.');
@@ -1610,9 +1573,7 @@ function RoomPage() {
             // Publish audio track
             if (wsRef.current) {
                 for (const track of stream.getTracks()) {
-                    console.log('Publishing audio track:', track.kind);
                     const publisher = await publishTransportRef.current.publish(track);
-                    console.log('Audio publisher created:', publisher.id);
                     wsRef.current.send(JSON.stringify({ action: 'Offer', sdp: publisher.offer }));
                     wsRef.current.send(JSON.stringify({ action: 'Publish', publisherId: publisher.id }));
                     audioPublisherIdsRef.current.push(publisher.id);
@@ -1635,7 +1596,6 @@ function RoomPage() {
 
         // Send StopPublish for all audio publisher IDs
         audioPublisherIdsRef.current.forEach((id) => {
-            console.log('Stopping audio publisher:', id);
             wsRef.current?.send(JSON.stringify({ action: 'StopPublish', publisherId: id }));
         });
 
