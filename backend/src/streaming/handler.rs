@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use actix::{Actor, AsyncContext, Handler, Message, StreamHandler};
+use actix::{Actor, ActorFutureExt, AsyncContext, Handler, Message, StreamHandler, WrapFuture};
 use actix_web::web::Data;
 use actix_web_actors::ws;
 use rheomesh::publisher::Publisher;
@@ -43,6 +43,14 @@ pub struct Position {
     pub x: f32,
     pub y: f32,
     pub z: f32,
+}
+
+/// Publisher info for sync/polling
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PublisherInfo {
+    pub publisher_id: String,
+    pub player_id: String,
 }
 
 /// Facial feature customization options
@@ -147,6 +155,46 @@ impl Actor for StreamingSession {
 
     fn started(&mut self, ctx: &mut Self::Context) {
         let address = ctx.address();
+        
+        // CRITICAL: Set up ALL callbacks BEFORE processing any messages
+        // Using ctx.wait() ensures the actor won't process ANY messages until this completes
+        let publish_transport = self.publish_transport.clone();
+        let subscribe_transport = self.subscribe_transport.clone();
+        let addr = address.clone();
+
+        let setup_fut = async move {
+            // Publish transport: ICE candidate callback
+            let addr_clone = addr.clone();
+            publish_transport.on_ice_candidate(Box::new(move |candidate| {
+                if let Ok(json) = candidate.to_json() {
+                    tracing::debug!("[ICE] Publisher candidate generated");
+                    addr_clone.do_send(SendingMessage::PublisherIce { candidate: json });
+                }
+            })).await;
+            
+            // Subscribe transport: ICE candidate callback
+            let addr_clone = addr.clone();
+            subscribe_transport.on_ice_candidate(Box::new(move |candidate| {
+                if let Ok(json) = candidate.to_json() {
+                    tracing::debug!("[ICE] Subscriber candidate generated");
+                    addr_clone.do_send(SendingMessage::SubscriberIce { candidate: json });
+                }
+            })).await;
+            
+            // Subscribe transport: Negotiation needed callback (triggers Offer when tracks are added)
+            let addr_clone = addr.clone();
+            subscribe_transport.on_negotiation_needed(Box::new(move |offer| {
+                tracing::debug!("[SUBSCRIBE] Negotiation needed, sending Offer");
+                addr_clone.do_send(SendingMessage::Offer { sdp: offer });
+            })).await;
+            
+            tracing::info!("[SESSION] All callbacks registered");
+        };
+        
+        // Block message processing until callbacks are set up
+        ctx.wait(setup_fut.into_actor(self));
+        
+        // Now do player/room setup
         self.player_id = self.room.add_player(address.clone(), self.player_data.clone());
 
         tracing::info!("[JOINED] player={} id={}", self.player_data.name, &self.player_id[..8]);
@@ -236,49 +284,37 @@ impl Handler<ReceivedMessage> for StreamingSession {
                 address.do_send(SendingMessage::Pong);
             }
             ReceivedMessage::PublisherInit => {
-                tracing::info!("[{}] PublisherInit", player_name);
-                let publish_transport = self.publish_transport.clone();
-                actix::spawn(async move {
-                    publish_transport
-                        .on_ice_candidate(Box::new(move |candidate| {
-                            let init = candidate.to_json().expect("failed to parse candidate");
-                            address.do_send(SendingMessage::PublisherIce { candidate: init });
-                        }))
-                        .await;
-                });
+                // Callbacks are set up in started(), this just logs
+                tracing::info!("[{}] PublisherInit (callbacks already registered)", player_name);
             }
             ReceivedMessage::SubscriberInit => {
-                tracing::info!("[{}] SubscriberInit", player_name);
-                let subscribe_transport = self.subscribe_transport.clone();
+                // Callbacks are set up in started()
+                // Just send existing publishers to this client
+                tracing::info!("[{}] SubscriberInit (callbacks already registered)", player_name);
                 let room = self.room.clone();
-
-                actix::spawn(async move {
-                    let addr = address.clone();
-                    let addr2 = address.clone();
-
-                    subscribe_transport
-                        .on_ice_candidate(Box::new(move |candidate| {
-                            let init = candidate.to_json().expect("failed to parse candidate");
-                            addr.do_send(SendingMessage::SubscriberIce { candidate: init });
-                        }))
-                        .await;
-
-                    subscribe_transport
-                        .on_negotiation_needed(Box::new(move |offer| {
-                            addr2.do_send(SendingMessage::Offer { sdp: offer });
-                        }))
-                        .await;
-
-                    // Send existing publishers grouped by player
-                    let all_publishers = room.get_all_publishers();
-                    let mut publishers_by_player: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-                    for (publisher_id, player_id) in all_publishers {
-                        publishers_by_player.entry(player_id).or_insert_with(Vec::new).push(publisher_id);
-                    }
-                    for (player_id, publisher_ids) in publishers_by_player {
-                        address.do_send(SendingMessage::Published { publisher_ids, player_id });
-                    }
-                });
+                
+                // Send existing publishers grouped by player
+                let all_publishers = room.get_all_publishers();
+                let mut publishers_by_player: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+                for (publisher_id, player_id) in all_publishers {
+                    publishers_by_player.entry(player_id).or_insert_with(Vec::new).push(publisher_id);
+                }
+                for (player_id, publisher_ids) in publishers_by_player {
+                    address.do_send(SendingMessage::Published { publisher_ids, player_id });
+                }
+            }
+            ReceivedMessage::GetPublishers => {
+                // Return all active publishers for polling-based discovery
+                tracing::info!("[{}] GetPublishers", player_name);
+                let room = self.room.clone();
+                let all_publishers = room.get_all_publishers();
+                
+                let publishers: Vec<PublisherInfo> = all_publishers
+                    .into_iter()
+                    .map(|(publisher_id, player_id)| PublisherInfo { publisher_id, player_id })
+                    .collect();
+                
+                address.do_send(SendingMessage::PublisherList { publishers });
             }
             ReceivedMessage::PublisherIce { candidate } => {
                 let publish_transport = self.publish_transport.clone();
@@ -495,6 +531,9 @@ enum ReceivedMessage {
     PlayerMove { position: Position, rotation: f32, is_moving: bool },
     #[serde(rename_all = "camelCase")]
     PlayAnimation { animation: String },
+    /// Client requests list of all active publishers (polling mechanism)
+    #[serde(rename_all = "camelCase")]
+    GetPublishers,
 }
 
 /// Messages sent to the client
@@ -532,4 +571,7 @@ enum SendingMessage {
     PlayerMoved { player_id: String, position: Position, rotation: f32, is_moving: bool },
     #[serde(rename_all = "camelCase")]
     PlayerAnimation { player_id: String, animation: String },
+    /// Response with all active publishers (for polling)
+    #[serde(rename_all = "camelCase")]
+    PublisherList { publishers: Vec<PublisherInfo> },
 }

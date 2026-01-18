@@ -1209,18 +1209,21 @@ function RoomPage() {
     const [isScreenSharing, setIsScreenSharing] = useState(false);
     const [localVideoStream, setLocalVideoStream] = useState<MediaStream | undefined>(undefined);
     const subscribeTransportReady = useRef<boolean>(false);
+    const publishTransportReady = useRef<boolean>(false);
     const pendingSubscriptions = useRef<Array<{ publisherId: string, playerId: string }>>([]);
     const [iceServers, setIceServers] = useState<RTCIceServer[]>([
-        { urls: [
-            'stun:stun.l.google.com:19302',
-            'stun:stun1.l.google.com:19302',
-            'stun:stun2.l.google.com:19302',
-            'stun:stun.cloudflare.com:3478'
-        ]},
+        {
+            urls: [
+                'stun:stun.l.google.com:19302',
+                'stun:stun1.l.google.com:19302',
+                'stun:stun2.l.google.com:19302',
+                'stun:stun.cloudflare.com:3478'
+            ]
+        },
     ]);
     const [isIceConfigLoaded, setIsIceConfigLoaded] = useState(false);
 
-// Memoize peerConnectionConfig to ensure it's stable and uses the latest iceServers
+    // Memoize peerConnectionConfig to ensure it's stable and uses the latest iceServers
     const peerConnectionConfig = useMemo<RTCConfiguration>(() => {
         console.log('[CONFIG] Building peerConnectionConfig with', iceServers.length, 'ICE server groups');
         return {
@@ -1395,6 +1398,25 @@ function RoomPage() {
                 console.log('🚀 Starting subscribe peer after delay...');
                 startSubscribePeer();
             }, 100);
+
+            // Poll for publishers every 3 seconds as fallback for missed Published messages
+            const pollInterval = setInterval(() => {
+                if (wsRef.current?.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(JSON.stringify({ action: 'GetPublishers' }));
+                }
+            }, 3000);
+
+            // Initial poll after 1.5 seconds
+            setTimeout(() => {
+                if (wsRef.current?.readyState === WebSocket.OPEN) {
+                    console.log('[POLL] Initial GetPublishers request');
+                    wsRef.current.send(JSON.stringify({ action: 'GetPublishers' }));
+                }
+            }, 1500);
+
+            return () => {
+                clearInterval(pollInterval);
+            };
         }
     }, [isConnected, isIceConfigLoaded, peerConnectionConfig]);
 
@@ -1407,6 +1429,13 @@ function RoomPage() {
 
             console.log('[PUBLISH] Sending PublisherInit to server');
             wsRef.current.send(JSON.stringify({ action: 'PublisherInit' }));
+
+            // Wait for backend to set up ICE callback before allowing publish
+            // This prevents race condition where ICE candidates are lost
+            setTimeout(() => {
+                publishTransportReady.current = true;
+                console.log('[PUBLISH] Transport ready flag set after delay');
+            }, 300);
 
             publishTransport.on('icecandidate', (candidate) => {
                 console.log('[PUBLISH] ICE candidate:', candidate?.candidate?.slice(0, 80));
@@ -1753,6 +1782,36 @@ function RoomPage() {
                     return filtered;
                 });
                 break;
+
+            case 'PublisherList':
+                // Handle polling response - subscribe to any missing publishers
+                if (message.publishers && Array.isArray(message.publishers)) {
+                    const missing: string[] = [];
+                    message.publishers.forEach((pub: { publisherId: string; playerId: string }) => {
+                        // Track publisher to player mapping
+                        if (pub.playerId && pub.playerId !== '') {
+                            publisherToPlayerRef.current.set(pub.publisherId, pub.playerId);
+                        }
+
+                        // Check if we need to subscribe
+                        const isOurPublisher = publisherIdsRef.current.includes(pub.publisherId);
+                        const alreadySubscribed = subscribedIdsRef.current.has(pub.publisherId);
+
+                        if (!isOurPublisher && !alreadySubscribed) {
+                            missing.push(pub.publisherId);
+                            subscribedIdsRef.current.add(pub.publisherId);
+                            wsRef.current?.send(JSON.stringify({ action: 'Subscribe', publisherId: pub.publisherId }));
+                            pendingSubscriptions.current.push({
+                                publisherId: pub.publisherId,
+                                playerId: pub.playerId || ''
+                            });
+                        }
+                    });
+                    if (missing.length > 0) {
+                        console.log('[POLL] Found', missing.length, 'missing publishers, subscribing:', missing.map(id => id.slice(0, 8)));
+                    }
+                }
+                break;
         }
     };
 
@@ -2057,6 +2116,22 @@ function RoomPage() {
                 return;
             }
             console.log('[MIC] PublishTransport is available');
+
+            // Wait for backend ICE callback to be ready (prevents race condition)
+            if (!publishTransportReady.current) {
+                console.log('[MIC] Waiting for publish transport to be ready...');
+                await new Promise<void>(resolve => {
+                    const check = () => {
+                        if (publishTransportReady.current) {
+                            resolve();
+                        } else {
+                            setTimeout(check, 50);
+                        }
+                    };
+                    check();
+                });
+                console.log('[MIC] Publish transport now ready');
+            }
 
             // Publish audio track with retry logic for DTLS failures
             const publishWithRetry = async (track: MediaStreamTrack, retryCount = 0): Promise<void> => {
