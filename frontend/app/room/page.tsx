@@ -700,7 +700,7 @@ export default function RoomPage() {
                     <pointLight position={[0, 4, 0]} intensity={108} />
                     {/* <RoomFloor /> */}
                     {/* <RoomWalls /> */}
-                    <SplatViewer url="/assets/fixed.ply" position={[0, -1.8, 0]} rotation={[1, 0, 0, 0]} scale={[7, 7, 7]} />
+                    <SplatViewer url="/assets/final.ply" position={[0, -1.8, 0]} rotation={[1, 0, 0, 0]} scale={[7, 7, 7]} />
                     <Suspense fallback={null}>
                         {localPlayer && (
                             <LocalPlayer player={localPlayer} onMove={handlePlayerMove} onAnimation={handleAnimation} />
