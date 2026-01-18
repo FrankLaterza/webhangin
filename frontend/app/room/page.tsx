@@ -1482,6 +1482,12 @@ function RoomPage() {
 
     const startStreaming = async () => {
         try {
+            // Check if mediaDevices API is available
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+                alert('Screen sharing is not supported. Please use HTTPS or localhost.');
+                return;
+            }
+
             setIsScreenSharing(true); // Show tablet immediately
             const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
             if (localVideoRef.current) localVideoRef.current.srcObject = stream;
@@ -1529,6 +1535,12 @@ function RoomPage() {
     const startMicrophone = async () => {
         try {
             console.log('Starting microphone...');
+
+            // Check if mediaDevices API is available
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                throw new Error('getUserMedia is not supported. Please use HTTPS or localhost.');
+            }
+
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             localAudioStreamRef.current = stream;
             setIsMicActive(true);
