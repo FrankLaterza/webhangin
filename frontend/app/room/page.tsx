@@ -45,7 +45,7 @@ interface RemoteStream {
 type AnimationType = 'jump' | 'wave' | 'dance' | null;
 
 // Streaming Screen component - displays video stream as a 3D texture
-function StreamingScreen({ videoStream, onClick }: { videoStream: MediaStream; onClick?: () => void }) {
+function StreamingScreen({ videoStream, onClick, isCinemaOverride }: { videoStream: MediaStream; onClick?: () => void; isCinemaOverride?: boolean }) {
     const [videoTexture, setVideoTexture] = useState<THREE.VideoTexture | null>(null);
     const meshRef = useRef<THREE.Mesh>(null);
 
@@ -88,6 +88,27 @@ function StreamingScreen({ videoStream, onClick }: { videoStream: MediaStream; o
     });
 
     if (!videoTexture) return null;
+
+    if (isCinemaOverride) {
+        return (
+            <group position={[1.25, 4, 5]} rotation={[0, Math.PI, 0]}>
+                <mesh
+                    ref={meshRef}
+                    onClick={(e) => {
+                        if (onClick) {
+                            e.stopPropagation();
+                            onClick();
+                        }
+                    }}
+                    onPointerOver={() => document.body.style.cursor = onClick ? 'pointer' : 'default'}
+                    onPointerOut={() => document.body.style.cursor = 'default'}
+                >
+                    <planeGeometry args={[8.5, 5]} />
+                    <meshBasicMaterial map={videoTexture} side={THREE.DoubleSide} />
+                </mesh>
+            </group>
+        );
+    }
 
     return (
         <group position={[0, -0.1, 0.35]} rotation={[1.22, Math.PI, 0]}>
@@ -371,7 +392,7 @@ function AvatarMesh({
 }
 
 // Player avatar component with animation support
-function PlayerAvatar({ player, animation, isTalking, audioStream, videoStream, localPlayerPosition, onTabletClick }: { player: PlayerData; animation: AnimationType; isTalking?: boolean; audioStream?: MediaStream; videoStream?: MediaStream; localPlayerPosition?: THREE.Vector3; onTabletClick?: () => void }) {
+function PlayerAvatar({ player, animation, isTalking, audioStream, videoStream, localPlayerPosition, onTabletClick, hideTablet }: { player: PlayerData; animation: AnimationType; isTalking?: boolean; audioStream?: MediaStream; videoStream?: MediaStream; localPlayerPosition?: THREE.Vector3; onTabletClick?: () => void; hideTablet?: boolean }) {
     const groupRef = useRef<THREE.Group>(null);
     const { triggerAnimation, updateAnimation } = usePlayerAnimation();
     const micTexture = useTexture('/assets/textures/mic-talking-indicator_sprite_sheet.png');
@@ -427,7 +448,7 @@ function PlayerAvatar({ player, animation, isTalking, audioStream, videoStream, 
             />
 
             {/* Streaming Screen - floating video display */}
-            {videoStream && <StreamingScreen videoStream={videoStream} onClick={onTabletClick} />}
+            {videoStream && !hideTablet && <StreamingScreen videoStream={videoStream} onClick={onTabletClick} />}
 
             {/* Talking indicator */}
             {isTalking && (
@@ -475,7 +496,9 @@ function LocalPlayer({
     onAnimation,
     isTalking,
     videoStream,
-    isCamping
+    isCamping,
+    isCinema,
+    hideTablet
 }: {
     player: PlayerData;
     onMove: (position: Position, rotation: number, isMoving: boolean) => void;
@@ -483,6 +506,8 @@ function LocalPlayer({
     isTalking?: boolean;
     videoStream?: MediaStream;
     isCamping?: boolean;
+    isCinema?: boolean;
+    hideTablet?: boolean;
 }) {
     const groupRef = useRef<THREE.Group>(null);
     const { camera, gl, scene } = useThree();
@@ -641,6 +666,14 @@ function LocalPlayer({
         const rotSpeed = 2 * delta;
         let moved = false;
 
+        // Position debug log (throttled to ~1 second)
+        const now = Date.now();
+        const lastLog = (window as any)._lastPosLog || 0;
+        if (now - lastLog > 1000) {
+            console.log('📍 Position:', positionRef.current);
+            (window as any)._lastPosLog = now;
+        }
+
         // W-tap injection
         if (initialInjection) {
             moved = true;
@@ -775,6 +808,25 @@ function LocalPlayer({
 
             // Smooth gravity/step-up
             positionRef.current.y = THREE.MathUtils.lerp(positionRef.current.y, targetY, 0.2);
+        } else if (isCinema) {
+            // Cinema Stage Platform (Simple Rectangle)
+            // X: -3.6 to 5.75
+            // Z: 1.6 to 4.6
+            // Y: 1
+            const px = positionRef.current.x;
+            const pz = positionRef.current.z;
+
+            // Platform 1 (Main Stage)
+            const onStage1 = px >= -3.6 && px <= 5.75 && pz >= .93 && pz <= 4.6;
+            // Platform 2 (Small Side Platform)
+            const onStage2 = px >= -3.7 && px <= 2.29 && pz >= -1.77 && pz <= -1.22;
+
+            let targetY = 0;
+            if (onStage1) targetY = 1.0;
+            else if (onStage2) targetY = 0.5;
+
+            // Smooth gravity/step-up
+            positionRef.current.y = THREE.MathUtils.lerp(positionRef.current.y, targetY, 0.2);
         }
 
         // Clamp to room boundaries (Removed for Camp scene)
@@ -876,7 +928,7 @@ function LocalPlayer({
             />
 
             {/* Streaming Screen - floating video display */}
-            {videoStream && <StreamingScreen videoStream={videoStream} />}
+            {videoStream && !hideTablet && <StreamingScreen videoStream={videoStream} />}
 
             {/* Talking indicator */}
             {isTalking && (
@@ -1555,6 +1607,32 @@ function RoomPage() {
         currentActivity.toLowerCase().includes('city') ||
         currentActivity.toLowerCase().includes('walking');
 
+    const isAtPodium = (pos: Position) => {
+        return Math.abs(pos.x - (-2)) < 0.5 &&
+            Math.abs(pos.y - 1) < 0.5 &&
+            Math.abs(pos.z - 4) < 0.5;
+    };
+
+    const podiumStream = useMemo(() => {
+        if (!isCinema) return null;
+
+        if (localPlayer && isAtPodium(localPlayer.position) && localVideoStream) {
+            return { stream: localVideoStream, name: localPlayer.name };
+        }
+
+        const remoteSpeaker = remotePlayers.find(p => {
+            if (!isAtPodium(p.position)) return false;
+            return remoteStreams.some(s => s.kind === 'video' && publisherToPlayerRef.current.get(s.publisherId) === p.id);
+        });
+
+        if (remoteSpeaker) {
+            const stream = remoteStreams.find(s => s.kind === 'video' && publisherToPlayerRef.current.get(s.publisherId) === remoteSpeaker.id)?.stream;
+            if (stream) return { stream, name: remoteSpeaker.name };
+        }
+
+        return null;
+    }, [isCinema, localPlayer, localVideoStream, remotePlayers, remoteStreams]);
+
     return (
         <>
             <style>{`
@@ -1590,6 +1668,16 @@ function RoomPage() {
                                     isTalking={talkingPlayers.has(localPlayer.id)}
                                     videoStream={localVideoStream}
                                     isCamping={isCamping}
+                                    isCinema={isCinema}
+                                    hideTablet={!!podiumStream && localPlayer?.name === podiumStream.name}
+                                />
+                            )}
+
+                            {/* Cinema Podium Screen */}
+                            {podiumStream && (
+                                <StreamingScreen
+                                    videoStream={podiumStream.stream}
+                                    isCinemaOverride={true}
                                 />
                             )}
 
@@ -1626,6 +1714,7 @@ function RoomPage() {
                                         videoStream={videoStream}
                                         localPlayerPosition={localPlayerPos}
                                         onTabletClick={videoStream ? () => setViewingStream({ stream: videoStream, playerName: player.name }) : undefined}
+                                        hideTablet={!!podiumStream && player.name === podiumStream.name}
                                     />
                                 );
                             })}
