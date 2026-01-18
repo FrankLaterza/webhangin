@@ -26,6 +26,12 @@ struct PlayerJoinQuery {
     eye_style: String,
     nose_style: String,
     mouth_style: String,
+    #[serde(default = "default_character_type")]
+    character_type: String,
+}
+
+fn default_character_type() -> String {
+    "cat".to_string()
 }
 
 /// Map activity to themed room
@@ -88,6 +94,7 @@ async fn websocket_handler(
             eye_style: query.eye_style.clone(),
             nose_style: query.nose_style.clone(),
             mouth_style: query.mouth_style.clone(),
+            character_type: query.character_type.clone(),
         },
         position: Default::default(),
         rotation: 0.0,

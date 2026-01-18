@@ -21,6 +21,7 @@ interface FacialFeatures {
     eyeStyle: string;
     noseStyle: string;
     mouthStyle: string;
+    characterType: 'cat' | 'dog';
 }
 
 interface PlayerData {
@@ -160,7 +161,19 @@ function usePlayerAnimation() {
         }
     };
 
+    const cancelAnimation = () => {
+        if (currentAnimation.current === 'dance') {
+            currentAnimation.current = null;
+            animationProgress.current = 0;
+        }
+    };
+
     const updateAnimation = (delta: number): number => {
+        // Special case for persistent animations
+        if (currentAnimation.current === 'dance') {
+            return 0;
+        }
+
         if (currentAnimation.current || animationProgress.current > 0) {
             animationProgress.current += delta * 3;
             if (animationProgress.current >= 1) {
@@ -170,13 +183,13 @@ function usePlayerAnimation() {
         }
 
         // Return height offset based on animation
-        if (currentAnimation.current === 'jump' || animationProgress.current > 0) {
+        if (currentAnimation.current === 'jump') {
             return Math.sin(animationProgress.current * Math.PI) * 1.5;
         }
         return 0;
     };
 
-    return { triggerAnimation, updateAnimation, currentAnimation, animationProgress };
+    return { triggerAnimation, updateAnimation, cancelAnimation, currentAnimation, animationProgress };
 
 }
 
@@ -206,6 +219,20 @@ function useCharacterAnimations(
             if (currentAction.current) {
                 currentAction.current.fadeOut(0.05); // Faster fade out for jump
                 currentAction.current = null;
+            }
+            return;
+        }
+
+        if (animation === 'dance') {
+            console.log('🐕 Animation: DANCE');
+            const danceAction = actions['Dance'];
+            if (danceAction && danceAction !== currentAction.current) {
+                if (currentAction.current) {
+                    currentAction.current.fadeOut(0.2);
+                }
+                // LoopRepeat for continuous dancing
+                danceAction.reset().setLoop(THREE.LoopRepeat, Infinity).fadeIn(0.2).play();
+                currentAction.current = danceAction;
             }
             return;
         }
@@ -363,7 +390,91 @@ function CatAvatar({
     return <primitive object={clone} scale={0.5} position={[0, -0.5, 0]} />;
 }
 
-// Unified Avatar Mesh Component (cat-only for now)
+// Dog Avatar Component
+function DogAvatar({
+    facialFeatures,
+    color,
+    animation,
+    isMoving,
+    playerName,
+    isFirstPerson
+}: {
+    facialFeatures: FacialFeatures;
+    color: string;
+    animation: AnimationType;
+    isMoving: boolean;
+    playerName: string;
+    isFirstPerson?: boolean;
+}) {
+    const { scene, animations } = useGLTF('/assets/models/TWISTED_dog_character.glb');
+    const clone = useMemo(() => {
+        const c = SkeletonUtils.clone(scene);
+        c.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+                child.material = child.material.clone();
+            }
+        });
+        return c;
+    }, [scene]);
+    const { actions, mixer } = useAnimations(animations, clone);
+
+    // Load facial textures (dog uses different naming convention)
+    const eyeTexture = useTexture(
+        `/assets/textures/character_facial_textures/eyes/${facialFeatures.eyeStyle}.png`
+    );
+    const noseTexture = useTexture(
+        `/assets/textures/character_facial_textures/nose/${facialFeatures.noseStyle}.png`
+    );
+
+    eyeTexture.flipY = false;
+    noseTexture.flipY = false;
+
+    // Apply textures and colors to named meshes
+    useEffect(() => {
+        clone.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+                switch (child.name) {
+                    case 'twisted_dog':
+                        if (child.material instanceof THREE.MeshStandardMaterial) {
+                            child.material.color.set(color);
+                            child.material.needsUpdate = true;
+                        }
+                        break;
+                    case 'twisted_dog_eyes_mesh':
+                        if (child.material instanceof THREE.MeshStandardMaterial) {
+                            child.material.map = eyeTexture;
+                            child.material.transparent = true;
+                            child.material.alphaTest = 0.1;
+                            child.material.color.set(0xffffff);
+                            child.material.needsUpdate = true;
+                        }
+                        break;
+                    case 'twisted_dog_nose_mesh':
+                        if (child.material instanceof THREE.MeshStandardMaterial) {
+                            child.material.map = noseTexture;
+                            child.material.transparent = true;
+                            child.material.alphaTest = 0.1;
+                            child.material.color.set(0xffffff);
+                            child.material.needsUpdate = true;
+                        }
+                        break;
+                }
+            }
+        });
+    }, [clone, color, eyeTexture, noseTexture]);
+
+    // Hide in first person
+    useEffect(() => {
+        clone.visible = !isFirstPerson;
+    }, [clone, isFirstPerson]);
+
+    // Use centralized animation logic
+    useCharacterAnimations(actions, mixer, animation, isMoving, playerName);
+
+    return <primitive object={clone} scale={0.5} position={[0, -0.5, 0]} />;
+}
+
+// Unified Avatar Mesh Component (cat or dog based on characterType)
 function AvatarMesh({
     facialFeatures,
     color,
@@ -379,6 +490,18 @@ function AvatarMesh({
     playerName: string;
     isFirstPerson?: boolean;
 }) {
+    if (facialFeatures.characterType === 'dog') {
+        return (
+            <DogAvatar
+                facialFeatures={facialFeatures}
+                color={color}
+                animation={animation}
+                isMoving={isMoving}
+                playerName={playerName}
+                isFirstPerson={isFirstPerson}
+            />
+        );
+    }
     return (
         <CatAvatar
             facialFeatures={facialFeatures}
@@ -537,7 +660,7 @@ function LocalPlayer({
     const keysPressed = useRef<Set<string>>(new Set());
     const positionRef = useRef<Position>({ ...player.position });
     const rotationRef = useRef<number>(player.rotation);
-    const { triggerAnimation, updateAnimation, currentAnimation } = usePlayerAnimation();
+    const { triggerAnimation, updateAnimation, cancelAnimation, currentAnimation } = usePlayerAnimation();
     const micTexture = useTexture('/assets/textures/mic-talking-indicator_sprite_sheet.png');
 
     // Configure sprite sheet texture
@@ -637,6 +760,12 @@ function LocalPlayer({
             // Toggle First Person
             if (e.key.toLowerCase() === 'f') {
                 setIsFirstPerson(prev => !prev);
+            }
+
+            // Dance animation
+            if (e.key.toLowerCase() === 'y' && !currentAnimation.current) {
+                triggerAnimation('dance');
+                onAnimation('dance');
             }
         };
 
@@ -749,6 +878,11 @@ function LocalPlayer({
         if (moved !== isMovingRef.current) {
             isMovingRef.current = moved;
             setIsMoving(moved);
+        }
+
+        // Cancel persistent animations (like dance) if moving
+        if (moved) {
+            cancelAnimation();
         }
 
         if (isCamping) {
@@ -1175,6 +1309,7 @@ function RoomPage() {
         const eyeStyle = searchParams.get('eyeStyle') || 'dreary';
         const noseStyle = searchParams.get('noseStyle') || 'kitty_opt';
         const mouthStyle = searchParams.get('mouthStyle') || 'meow';
+        const characterType = searchParams.get('characterType') || 'cat';
 
         const params = new URLSearchParams({
             name,
@@ -1183,6 +1318,7 @@ function RoomPage() {
             eyeStyle,
             noseStyle,
             mouthStyle,
+            characterType,
         });
 
         // Use current hostname for WebSocket connection (works with ngrok)

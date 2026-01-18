@@ -28,6 +28,12 @@ pub struct FacialFeatures {
     pub eye_style: String,
     pub nose_style: String,
     pub mouth_style: String,
+    #[serde(default = "default_character_type")]
+    pub character_type: String,
+}
+
+fn default_character_type() -> String {
+    "cat".to_string()
 }
 
 /// Player data for game state
