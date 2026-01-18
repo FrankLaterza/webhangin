@@ -10,6 +10,7 @@ import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { SpatialAudio } from './SpatialAudio';
 import { SplatViewer } from './SplatViewer';
 import { RoomEffects } from './RoomEffects';
+import { AnimaleseChatBubble } from './AnimaleseChatBubble';
 
 interface Position {
     x: number;
@@ -377,7 +378,7 @@ function AvatarMesh({
 }
 
 // Player avatar component with animation support
-function PlayerAvatar({ player, animation, isTalking, audioStream, videoStream, localPlayerPosition, onTabletClick, hideTablet, chatBubble }: { player: PlayerData; animation: AnimationType; isTalking?: boolean; audioStream?: MediaStream; videoStream?: MediaStream; localPlayerPosition?: THREE.Vector3; onTabletClick?: () => void; hideTablet?: boolean; chatBubble?: string }) {
+function PlayerAvatar({ player, animation, isTalking, audioStream, videoStream, localPlayerPosition, onTabletClick, hideTablet, chatBubble }: { player: PlayerData; animation: AnimationType; isTalking?: boolean; audioStream?: MediaStream; videoStream?: MediaStream; localPlayerPosition?: THREE.Vector3; onTabletClick?: () => void; hideTablet?: boolean; chatBubble?: { message: string; timestamp: number } }) {
     const groupRef = useRef<THREE.Group>(null);
     const { triggerAnimation, updateAnimation } = usePlayerAnimation();
     const micTexture = useTexture('/assets/textures/mic-talking-indicator_sprite_sheet.png');
@@ -460,25 +461,13 @@ function PlayerAvatar({ player, animation, isTalking, audioStream, videoStream, 
                 </Text>
             </Billboard>
 
-            {/* Chat Bubble */}
+            {/* Chat Bubble with Animalese */}
             {chatBubble && (
-                <Billboard position={[0, 1.5, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
-                    <mesh renderOrder={999}>
-                        <planeGeometry args={[Math.min(chatBubble.length * 0.12 + 0.4, 3), 0.6]} />
-                        <meshBasicMaterial color="#222222" opacity={0.95} transparent depthWrite={false} />
-                    </mesh>
-                    <Text
-                        fontSize={0.18}
-                        color="white"
-                        anchorX="center"
-                        anchorY="middle"
-                        maxWidth={2.5}
-                        position={[0, 0, 0.01]}
-                        renderOrder={1000}
-                    >
-                        {chatBubble.length > 35 ? chatBubble.slice(0, 35) + '...' : chatBubble}
-                    </Text>
-                </Billboard>
+                <AnimaleseChatBubble
+                    message={chatBubble.message}
+                    timestamp={chatBubble.timestamp}
+                    position={[0, 1.5, 0]}
+                />
             )}
 
             {/* Spatial audio */}
@@ -505,7 +494,8 @@ function LocalPlayer({
     isCamping,
     isCinema,
     hideTablet,
-    chatInputFocused
+    chatInputFocused,
+    chatBubble
 }: {
     player: PlayerData;
     onMove: (position: Position, rotation: number, isMoving: boolean) => void;
@@ -516,6 +506,7 @@ function LocalPlayer({
     isCinema?: boolean;
     hideTablet?: boolean;
     chatInputFocused?: boolean;
+    chatBubble?: { message: string; timestamp: number } | null;
 }) {
     const groupRef = useRef<THREE.Group>(null);
     const { camera, gl, scene } = useThree();
@@ -956,6 +947,15 @@ function LocalPlayer({
                     </Text>
                 </Billboard>
             )}
+
+            {/* Chat Bubble with Animalese */}
+            {chatBubble && (
+                <AnimaleseChatBubble
+                    message={chatBubble.message}
+                    timestamp={chatBubble.timestamp}
+                    position={[0, 1.5, 0]}
+                />
+            )}
         </group>
     );
 }
@@ -1051,6 +1051,7 @@ function RoomPage() {
     const remotePlayersRef = useRef<PlayerData[]>([]);
     const [chatMessages, setChatMessages] = useState<{ sender: string; message: string }[]>([]);
     const [playerChatBubbles, setPlayerChatBubbles] = useState<{ [playerId: string]: { message: string; timestamp: number } }>({});
+    const [localPlayerChatBubble, setLocalPlayerChatBubble] = useState<{ message: string; timestamp: number } | null>(null);
     const [chatInputFocused, setChatInputFocused] = useState(false);
     const [chatInput, setChatInput] = useState('');
     const [remoteStreams, setRemoteStreams] = useState<RemoteStream[]>([]);
@@ -1493,7 +1494,24 @@ function RoomPage() {
 
     const sendChat = () => {
         if (!wsRef.current || !chatInput.trim()) return;
-        wsRef.current.send(JSON.stringify({ action: 'ChatMessage', message: chatInput.trim() }));
+
+        const message = chatInput.trim();
+        wsRef.current.send(JSON.stringify({ action: 'ChatMessage', message }));
+
+        // Show chat bubble for local player
+        const bubbleTimestamp = Date.now();
+        setLocalPlayerChatBubble({ message, timestamp: bubbleTimestamp });
+
+        // Clear after 4 seconds (1s typing + 3s display)
+        setTimeout(() => {
+            setLocalPlayerChatBubble(prev => {
+                if (prev?.timestamp === bubbleTimestamp) {
+                    return null;
+                }
+                return prev;
+            });
+        }, 4000);
+
         setChatInput('');
     };
 
@@ -1505,8 +1523,16 @@ function RoomPage() {
                 return;
             }
 
-            setIsScreenSharing(true); // Show tablet immediately
+            // Don't allow starting a new stream if already streaming
+            if (isScreenSharing || localStreamRef.current) {
+                console.log('Already streaming, ignoring start request');
+                return;
+            }
+
             const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+
+            // Only set state after successfully getting the stream
+            setIsScreenSharing(true);
             if (localVideoRef.current) localVideoRef.current.srcObject = stream;
             localStreamRef.current = stream;
 
@@ -1528,8 +1554,8 @@ function RoomPage() {
             }
         } catch (error) {
             console.error('Error starting stream:', error);
-            setIsScreenSharing(false); // Hide tablet if error
-            setLocalVideoStream(undefined);
+            // Only clear state if we weren't already streaming
+            // (This prevents clearing state when user cancels the dialog while already streaming)
         }
     };
 
@@ -1693,6 +1719,7 @@ function RoomPage() {
                                     isCinema={isCinema}
                                     hideTablet={!!podiumStream && localPlayer?.name === podiumStream.name}
                                     chatInputFocused={chatInputFocused}
+                                    chatBubble={localPlayerChatBubble}
                                 />
                             )}
 
@@ -1738,7 +1765,7 @@ function RoomPage() {
                                         localPlayerPosition={localPlayerPos}
                                         onTabletClick={videoStream ? () => setViewingStream({ stream: videoStream, playerName: player.name }) : undefined}
                                         hideTablet={!!podiumStream && player.name === podiumStream.name}
-                                        chatBubble={playerChatBubbles[player.id]?.message}
+                                        chatBubble={playerChatBubbles[player.id]}
                                     />
                                 );
                             })}
