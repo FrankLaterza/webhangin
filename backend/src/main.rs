@@ -14,7 +14,7 @@ use webrtc::api::media_engine;
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters};
 use webrtc::rtp_transceiver::RTCPFeedback;
 
-use streaming::{RoomOwner, StreamingSession, PlayerData, FacialFeatures};
+use streaming::{RoomOwner, StreamingSession, PlayerData, FacialFeatures, fetch_xirsys_ice_servers};
 
 /// Query parameters for joining a room
 #[derive(Deserialize)]
@@ -105,6 +105,12 @@ async fn websocket_handler(
     let (room_id, room_theme) = activity_to_room(&query.activity);
     tracing::info!("Player {} joining room {} (activity: {})", query.name, room_id, query.activity);
 
+    // Get ICE servers from the owner
+    let ice_servers = {
+        let owner = room_owner.lock().await;
+        owner.get_ice_servers()
+    };
+
     let find = room_owner
         .as_ref()
         .lock()
@@ -120,14 +126,15 @@ async fn websocket_handler(
     match find {
         Some(room) => {
             tracing::info!("Room found, so joining it: {}", room_id);
-            let server = StreamingSession::new(room, room_owner.clone(), player_data).await;
+            let server = StreamingSession::new(room, room_owner.clone(), player_data, ice_servers).await;
             ws::start(server, &req, stream)
         }
         None => {
             let owner = room_owner.clone();
             let mut owner = owner.lock().await;
             let room = owner.create_new_room(room_id.to_string(), room_theme.to_string(), config).await;
-            let server = StreamingSession::new(room, room_owner.clone(), player_data).await;
+            drop(owner); // Release lock before creating session
+            let server = StreamingSession::new(room, room_owner.clone(), player_data, ice_servers).await;
             ws::start(server, &req, stream)
         }
     }
@@ -135,20 +142,33 @@ async fn websocket_handler(
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // Initialize tracing with reduced WebRTC verbosity
+    // Load environment variables from .env file (check both backend and frontend dirs)
+    if dotenv::from_filename("../.env").is_err() {
+        if dotenv::from_filename("../frontend/.env").is_err() {
+            tracing::warn!("No .env file found, will use environment variables");
+        }
+    }
+
+    // Initialize tracing - enable DTLS and WebRTC debug for connection issues
+    // Set RUST_LOG=webrtc_dtls=debug,webrtc=debug for more verbose output
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn,backend=info,rheomesh=info".into()),
+                .unwrap_or_else(|_| "warn,backend=info,rheomesh=info,webrtc_dtls=debug,dtls=debug,webrtc::peer_connection=debug,webrtc::dtls_transport=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
+
+    // Fetch TURN servers from Xirsys
+    println!("🔄 Fetching TURN servers from Xirsys...");
+    let ice_servers = fetch_xirsys_ice_servers().await;
+    println!("✅ Configured {} ICE server groups", ice_servers.len());
 
     // Initialize Rheomesh worker
     let worker = rheomesh::worker::Worker::new(rheomesh::config::WorkerConfig::default())
         .await
         .expect("Failed to create worker");
-    let room_owner: RoomOwner<StreamingSession> = RoomOwner::new(worker);
+    let room_owner: RoomOwner<StreamingSession> = RoomOwner::new(worker, ice_servers);
     let room_data = Data::new(Mutex::new(room_owner));
 
     println!("🚀 WebHangin server starting on http://0.0.0.0:3001");
