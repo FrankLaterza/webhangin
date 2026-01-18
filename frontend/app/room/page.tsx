@@ -44,6 +44,89 @@ interface RemoteStream {
 // Animation types that can be triggered
 type AnimationType = 'jump' | 'wave' | 'dance' | null;
 
+// Streaming Screen component - displays video stream as a 3D texture
+function StreamingScreen({ videoStream, onClick }: { videoStream: MediaStream; onClick?: () => void }) {
+    const [videoTexture, setVideoTexture] = useState<THREE.VideoTexture | null>(null);
+    const meshRef = useRef<THREE.Mesh>(null);
+
+    useEffect(() => {
+        // Create video element and set up stream
+        const video = document.createElement('video');
+        video.playsInline = true;
+        video.muted = true;
+        video.autoplay = true;
+        video.srcObject = videoStream;
+
+        // Wait for video to be ready
+        video.onloadedmetadata = () => {
+            video.play().then(() => {
+                // Create texture from video
+                const texture = new THREE.VideoTexture(video);
+                texture.minFilter = THREE.LinearFilter;
+                texture.magFilter = THREE.LinearFilter;
+                texture.format = THREE.RGBAFormat;
+                setVideoTexture(texture);
+            }).catch(err => {
+                console.error('Error playing video:', err);
+            });
+        };
+
+        return () => {
+            video.pause();
+            video.srcObject = null;
+            if (videoTexture) {
+                videoTexture.dispose();
+            }
+        };
+    }, [videoStream]);
+
+    // Update texture every frame
+    useFrame(() => {
+        if (videoTexture) {
+            videoTexture.needsUpdate = true;
+        }
+    });
+
+    if (!videoTexture) return null;
+
+    return (
+        <group position={[0, -0.1, 0.35]} rotation={[1.22, Math.PI, 0]}>
+            {/* Thick black tablet body */}
+            <mesh
+                position={[0, 0, -0.025]}
+                onClick={(e) => {
+                    if (onClick) {
+                        e.stopPropagation();
+                        onClick();
+                    }
+                }}
+                onPointerOver={() => document.body.style.cursor = onClick ? 'pointer' : 'default'}
+                onPointerOut={() => document.body.style.cursor = 'default'}
+            >
+                <boxGeometry args={[0.6, 0.38, 0.05]} />
+                <meshBasicMaterial color="#000000" />
+            </mesh>
+
+            {/* Video screen on front face */}
+            <mesh
+                ref={meshRef}
+                position={[0, 0, 0.001]}
+                onClick={(e) => {
+                    if (onClick) {
+                        e.stopPropagation();
+                        onClick();
+                    }
+                }}
+                onPointerOver={() => document.body.style.cursor = onClick ? 'pointer' : 'default'}
+                onPointerOut={() => document.body.style.cursor = 'default'}
+            >
+                <planeGeometry args={[0.52, 0.3]} />
+                <meshBasicMaterial map={videoTexture} side={THREE.DoubleSide} />
+            </mesh>
+        </group>
+    );
+}
+
 // Shared animation logic hook
 function usePlayerAnimation() {
     const animationProgress = useRef(0);
@@ -265,7 +348,7 @@ function AvatarMesh({
 }
 
 // Player avatar component with animation support
-function PlayerAvatar({ player, animation, isTalking, audioStream }: { player: PlayerData; animation: AnimationType; isTalking?: boolean; audioStream?: MediaStream }) {
+function PlayerAvatar({ player, animation, isTalking, audioStream, videoStream, localPlayerPosition, onTabletClick }: { player: PlayerData; animation: AnimationType; isTalking?: boolean; audioStream?: MediaStream; videoStream?: MediaStream; localPlayerPosition?: THREE.Vector3; onTabletClick?: () => void }) {
     const groupRef = useRef<THREE.Group>(null);
     const { triggerAnimation, updateAnimation } = usePlayerAnimation();
     const micTexture = useTexture('/assets/textures/mic-talking-indicator_sprite_sheet.png');
@@ -320,6 +403,9 @@ function PlayerAvatar({ player, animation, isTalking, audioStream }: { player: P
                 playerName={player.name}
             />
 
+            {/* Streaming Screen - floating video display */}
+            {videoStream && <StreamingScreen videoStream={videoStream} onClick={onTabletClick} />}
+
             {/* Talking indicator */}
             {isTalking && (
                 <Billboard position={[0, 1.6, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
@@ -346,10 +432,11 @@ function PlayerAvatar({ player, animation, isTalking, audioStream }: { player: P
             </Billboard>
 
             {/* Spatial audio */}
-            {audioStream && groupRef.current && (
+            {audioStream && groupRef.current && localPlayerPosition && (
                 <SpatialAudio
                     audioStream={audioStream}
                     targetPosition={groupRef.current.position}
+                    localPlayerPosition={localPlayerPosition}
                     playerId={player.id}
                     soundRadius={20}
                 />
@@ -364,12 +451,14 @@ function LocalPlayer({
     onMove,
     onAnimation,
     isTalking,
+    videoStream,
     isCamping
 }: {
     player: PlayerData;
     onMove: (position: Position, rotation: number, isMoving: boolean) => void;
     onAnimation: (animation: AnimationType) => void;
     isTalking?: boolean;
+    videoStream?: MediaStream;
     isCamping?: boolean;
 }) {
     const groupRef = useRef<THREE.Group>(null);
@@ -707,6 +796,9 @@ function LocalPlayer({
                 playerName={player.name}
             />
 
+            {/* Streaming Screen - floating video display */}
+            {videoStream && <StreamingScreen videoStream={videoStream} />}
+
             {/* Talking indicator */}
             {isTalking && (
                 <Billboard position={[0, 1.6, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
@@ -792,6 +884,8 @@ function RoomPage() {
     const [remoteStreams, setRemoteStreams] = useState<RemoteStream[]>([]);
     const [playerAnimations, setPlayerAnimations] = useState<Record<string, AnimationType>>({});
     const [talkingPlayers, setTalkingPlayers] = useState<Set<string>>(new Set());
+    const [screenSharingPlayers, setScreenSharingPlayers] = useState<Set<string>>(new Set());
+    const [viewingStream, setViewingStream] = useState<{ stream: MediaStream; playerName: string } | null>(null);
 
     const wsRef = useRef<WebSocket | null>(null);
     const publishTransportRef = useRef<PublishTransport | null>(null);
@@ -805,11 +899,20 @@ function RoomPage() {
     const moveThrottleRef = useRef<number>(0);
     const [isMicActive, setIsMicActive] = useState(false);
     const [isMicMuted, setIsMicMuted] = useState(false);
+    const [isScreenSharing, setIsScreenSharing] = useState(false);
+    const [localVideoStream, setLocalVideoStream] = useState<MediaStream | undefined>(undefined);
     const subscribeTransportReady = useRef<boolean>(false);
     const pendingSubscriptions = useRef<Array<{ publisherId: string, playerId: string }>>([]);
 
     const peerConnectionConfig: RTCConfiguration = {
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+        iceServers: [
+            { urls: [
+                'stun:stun.l.google.com:19302',
+                'stun:stun1.l.google.com:19302',
+                'stun:stun2.l.google.com:19302',
+                'stun:stun.cloudflare.com:3478'
+            ]},
+        ],
     };
 
     const audioAnalyzersRef = useRef<Map<string, AnalyserNode>>(new Map());
@@ -1017,6 +1120,12 @@ function RoomPage() {
                     console.log(`Player ${leavingPlayerId} left, removed ${prev.length - filtered.length} streams`);
                     return filtered;
                 });
+                // Remove from screen sharing players
+                setScreenSharingPlayers((prev) => {
+                    const newSet = new Set(prev);
+                    newSet.delete(leavingPlayerId);
+                    return newSet;
+                });
                 // Clean up publisher-to-player mappings for this player
                 publisherToPlayerRef.current.forEach((playerId, publisherId) => {
                     if (playerId === leavingPlayerId) {
@@ -1118,7 +1227,19 @@ function RoomPage() {
             case 'Unpublished':
                 console.log('Unpublished publisher:', message.publisherId);
                 subscribedIdsRef.current.delete(message.publisherId);
+
+                // Remove from screen sharing players if it was a video stream
+                const playerId = publisherToPlayerRef.current.get(message.publisherId);
                 setRemoteStreams((prev) => {
+                    const unpublishedStream = prev.find((s) => s.publisherId === message.publisherId);
+                    if (unpublishedStream?.kind === 'video' && playerId) {
+                        setScreenSharingPlayers((prevPlayers) => {
+                            const newSet = new Set(prevPlayers);
+                            newSet.delete(playerId);
+                            return newSet;
+                        });
+                    }
+
                     const filtered = prev.filter((s) => s.publisherId !== message.publisherId);
                     console.log('Remote streams after unpublish:', filtered.length);
                     return filtered;
@@ -1146,6 +1267,14 @@ function RoomPage() {
             if (kind === 'audio') {
                 const playerId = publisherToPlayerRef.current.get(publisherId) || publisherId;
                 analyzeAudioLevel(playerId, stream);
+            }
+
+            // Track screen sharing players (for showing tablet immediately)
+            if (kind === 'video') {
+                const playerId = publisherToPlayerRef.current.get(publisherId);
+                if (playerId) {
+                    setScreenSharingPlayers((prev) => new Set(prev).add(playerId));
+                }
             }
 
             setRemoteStreams((prev) => {
@@ -1182,9 +1311,18 @@ function RoomPage() {
 
     const startStreaming = async () => {
         try {
+            setIsScreenSharing(true); // Show tablet immediately
             const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
             if (localVideoRef.current) localVideoRef.current.srcObject = stream;
             localStreamRef.current = stream;
+
+            // Extract just the video track for the 3D tablet
+            const videoTrack = stream.getVideoTracks()[0];
+            if (videoTrack) {
+                const videoOnlyStream = new MediaStream([videoTrack]);
+                setLocalVideoStream(videoOnlyStream); // This triggers re-render with video stream
+                console.log('📺 Set local video stream for tablet display');
+            }
 
             // Publish tracks
             if (publishTransportRef.current && wsRef.current) {
@@ -1198,6 +1336,8 @@ function RoomPage() {
             }
         } catch (error) {
             console.error('Error starting stream:', error);
+            setIsScreenSharing(false); // Hide tablet if error
+            setLocalVideoStream(undefined);
         }
     };
 
@@ -1211,6 +1351,8 @@ function RoomPage() {
             wsRef.current?.send(JSON.stringify({ action: 'StopPublish', publisherId: id }));
         });
         publisherIdsRef.current = [];
+        setIsScreenSharing(false); // Hide tablet
+        setLocalVideoStream(undefined); // Clear video stream
     };
 
     const startMicrophone = async () => {
@@ -1316,6 +1458,7 @@ function RoomPage() {
                                     onMove={handlePlayerMove}
                                     onAnimation={handleAnimation}
                                     isTalking={talkingPlayers.has(localPlayer.id)}
+                                    videoStream={localVideoStream}
                                     isCamping={isCamping}
                                 />
                             )}
@@ -1331,6 +1474,18 @@ function RoomPage() {
                                     return playerId === player.id;
                                 })?.stream;
 
+                                // Find video stream for this player
+                                const videoStream = remoteStreams.find((stream) => {
+                                    if (stream.kind !== 'video') return false;
+                                    const playerId = publisherToPlayerRef.current.get(stream.publisherId);
+                                    return playerId === player.id;
+                                })?.stream;
+
+                                // Convert local player position to THREE.Vector3
+                                const localPlayerPos = localPlayer
+                                    ? new THREE.Vector3(localPlayer.position.x, localPlayer.position.y, localPlayer.position.z)
+                                    : undefined;
+
                                 return (
                                     <PlayerAvatar
                                         key={player.id}
@@ -1338,6 +1493,9 @@ function RoomPage() {
                                         animation={playerAnimations[player.id] || null}
                                         isTalking={isTalking}
                                         audioStream={audioStream}
+                                        videoStream={videoStream}
+                                        localPlayerPosition={localPlayerPos}
+                                        onTabletClick={videoStream ? () => setViewingStream({ stream: videoStream, playerName: player.name }) : undefined}
                                     />
                                 );
                             })}
@@ -1347,45 +1505,45 @@ function RoomPage() {
 
                     {/* Room info overlay */}
                     <div className="absolute top-4 left-4 bg-black/50 backdrop-blur-sm rounded-lg px-4 py-2">
-                        <h2 className="text-white font-bold">{roomTheme || 'Loading...'}</h2>
-                        <p className="text-gray-400 text-sm">{remotePlayers.length + 1} players</p>
-                        <p className="text-gray-500 text-xs mt-1">WASD to move</p>
-                    </div>
-
-                    {/* Back button */}
-                    <a href="/" className="absolute top-4 right-4 text-gray-400 hover:text-white">
-                        ← Leave Room
-                    </a>
+                    <h2 className="text-white font-bold">{roomTheme || 'Loading...'}</h2>
+                    <p className="text-gray-400 text-sm">{remotePlayers.length + 1} players</p>
+                    <p className="text-gray-500 text-xs mt-1">WASD to move</p>
                 </div>
 
-                {/* Sidebar: Chat & Streams */}
-                <div className="w-80 bg-gray-800 flex flex-col border-l border-gray-700">
-                    {/* Streams */}
-                    <div className="p-3 border-b border-gray-700">
-                        <div className="flex gap-2 mb-2">
-                            <button
-                                onClick={startStreaming}
-                                className="flex-1 py-2 bg-green-600 hover:bg-green-700 rounded text-sm text-white"
-                            >
-                                🎥 Share Screen
-                            </button>
-                            <button
-                                onClick={stopStreaming}
-                                className="flex-1 py-2 bg-red-600 hover:bg-red-700 rounded text-sm text-white"
-                            >
-                                ⏹ Stop
-                            </button>
-                        </div>
+                {/* Back button */}
+                <a href="/" className="absolute top-4 right-4 text-gray-400 hover:text-white">
+                    ← Leave Room
+                </a>
+            </div>
 
-                        {/* Microphone controls */}
-                        <div className="flex gap-2 mb-2">
-                            {!isMicActive ? (
-                                <button
-                                    onClick={startMicrophone}
-                                    className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm text-white"
-                                >
-                                    🎤 Start Mic
-                                </button>
+            {/* Sidebar: Chat & Streams */}
+            <div className="w-80 bg-gray-800 flex flex-col border-l border-gray-700">
+                {/* Streams */}
+                <div className="p-3 border-b border-gray-700">
+                    <div className="flex gap-2 mb-2">
+                        <button
+                            onClick={startStreaming}
+                            className="flex-1 py-2 bg-green-600 hover:bg-green-700 rounded text-sm text-white"
+                        >
+                            🎥 Share Screen
+                        </button>
+                        <button
+                            onClick={stopStreaming}
+                            className="flex-1 py-2 bg-red-600 hover:bg-red-700 rounded text-sm text-white"
+                        >
+                            ⏹ Stop
+                        </button>
+                    </div>
+
+                    {/* Microphone controls */}
+                    <div className="flex gap-2 mb-2">
+                        {!isMicActive ? (
+                            <button
+                                onClick={startMicrophone}
+                                className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm text-white"
+                            >
+                                🎤 Start Mic
+                            </button>
                             ) : (
                                 <>
                                     <button
@@ -1512,6 +1670,38 @@ function RoomPage() {
                     </div>
                 </div>
             </div>
+
+            {/* Fullscreen Video Viewer */}
+            {viewingStream && (
+                <div className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center">
+                    <div className="relative w-full h-full max-w-7xl max-h-screen p-8">
+                        {/* Close button */}
+                        <button
+                            onClick={() => setViewingStream(null)}
+                            className="absolute top-4 right-4 w-12 h-12 bg-red-600 hover:bg-red-700 rounded-full flex items-center justify-center text-white text-2xl font-bold z-10"
+                        >
+                            ×
+                        </button>
+
+                        {/* Player name */}
+                        <div className="absolute top-4 left-4 bg-black/50 backdrop-blur-sm rounded-lg px-4 py-2 z-10">
+                            <h3 className="text-white font-bold text-lg">{viewingStream.playerName}'s Screen</h3>
+                        </div>
+
+                        {/* Video */}
+                        <video
+                            autoPlay
+                            playsInline
+                            className="w-full h-full object-contain"
+                            ref={(el) => {
+                                if (el && el.srcObject !== viewingStream.stream) {
+                                    el.srcObject = viewingStream.stream;
+                                }
+                            }}
+                        />
+                    </div>
+                </div>
+            )}
         </>
     );
 }
