@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use actix::{Actor, AsyncContext, Handler, Message, StreamHandler};
+use actix::{Actor, ActorFutureExt, AsyncContext, Handler, Message, StreamHandler, WrapFuture};
 use actix_web::web::Data;
 use actix_web_actors::ws;
 use rheomesh::publisher::Publisher;
@@ -154,6 +154,33 @@ impl Actor for StreamingSession {
 
     fn started(&mut self, ctx: &mut Self::Context) {
         let address = ctx.address();
+        
+        // Setup ICE Candidate forwarding FIRST - use ctx.wait() to block message processing
+        // until callbacks are set up (fixes race condition where Subscribe messages
+        // could be processed before ICE callbacks were registered)
+        let publish_transport = self.publish_transport.clone();
+        let subscribe_transport = self.subscribe_transport.clone();
+        let addr = address.clone();
+
+        let setup_fut = async move {
+            let addr_clone = addr.clone();
+            publish_transport.on_ice_candidate(Box::new(move |candidate| {
+                if let Ok(json) = candidate.to_json() {
+                    addr_clone.do_send(SendingMessage::PublisherIce { candidate: json });
+                }
+            })).await;
+            
+            let addr_clone = addr.clone();
+            subscribe_transport.on_ice_candidate(Box::new(move |candidate| {
+                 if let Ok(json) = candidate.to_json() {
+                     addr_clone.do_send(SendingMessage::SubscriberIce { candidate: json });
+                 }
+            })).await;
+        };
+        
+        ctx.wait(setup_fut.into_actor(self));
+        
+        // Now do player/room setup (these run after ICE callbacks are ready)
         self.player_id = self.room.add_player(address.clone(), self.player_data.clone());
 
         tracing::info!("[JOINED] player={} id={}", self.player_data.name, &self.player_id[..8]);
@@ -171,27 +198,6 @@ impl Actor for StreamingSession {
                 peer.do_send(SendingMessage::PlayerJoined { player: new_player_data.clone() });
             }
         }
-
-        // Setup ICE Candidate forwarding
-        let publish_transport = self.publish_transport.clone();
-        let subscribe_transport = self.subscribe_transport.clone();
-        let addr = address.clone();
-
-        actix::spawn(async move {
-            let addr_clone = addr.clone();
-            publish_transport.on_ice_candidate(Box::new(move |candidate| {
-                if let Ok(json) = candidate.to_json() {
-                    addr_clone.do_send(SendingMessage::PublisherIce { candidate: json });
-                }
-            })).await;
-            
-            let addr_clone = addr.clone();
-            subscribe_transport.on_ice_candidate(Box::new(move |candidate| {
-                 if let Ok(json) = candidate.to_json() {
-                     addr_clone.do_send(SendingMessage::SubscriberIce { candidate: json });
-                 }
-            })).await;
-        });
     }
 
     fn stopped(&mut self, ctx: &mut Self::Context) {
