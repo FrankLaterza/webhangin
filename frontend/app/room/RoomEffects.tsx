@@ -5,8 +5,8 @@ import { BlendFunction } from 'postprocessing';
 export function RoomEffects({ variant = 'default' }: { variant?: 'default' | 'camping' }) {
     if (variant === 'default') {
         return (
-            <EffectComposer disableNormalPass>
-                <Pixelation granularity={3} />
+            <EffectComposer enableNormalPass>
+                <Pixelation granularity={2} />
                 {/* Subtle vignette for default room */}
                 {/* <Vignette eskil={false} offset={0.1} darkness={0.3} /> */}
             </EffectComposer>
@@ -15,7 +15,7 @@ export function RoomEffects({ variant = 'default' }: { variant?: 'default' | 'ca
 
     // Webfishing / Camping Aesthetic
     return (
-        <EffectComposer disableNormalPass>
+        <EffectComposer enableNormalPass>
             {/* Lo-fi Pixelation (DS/Flash vibe) */}
             <Pixelation granularity={0} />
 

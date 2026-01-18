@@ -157,7 +157,15 @@ function CatAvatar({
 }) {
     const { scene, animations } = useGLTF('/assets/models/TWISTED_cat_character.glb');
     // Clone scene using SkeletonUtils to properly handle SkinnedMeshes (animations)
-    const clone = useMemo(() => SkeletonUtils.clone(scene), [scene]);
+    const clone = useMemo(() => {
+        const c = SkeletonUtils.clone(scene);
+        c.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+                child.material = child.material.clone();
+            }
+        });
+        return c;
+    }, [scene]);
     const { actions, mixer } = useAnimations(animations, clone);
 
     // Load facial textures
@@ -674,7 +682,7 @@ function LocalPlayer({
 
         // Update camera to follow
         camera.position.set(camX, camY, camZ);
-        camera.lookAt(positionRef.current.x, positionRef.current.y + 1.5 + heightOffset, positionRef.current.z); // Look slightly higher
+        camera.lookAt(positionRef.current.x, positionRef.current.y + heightOffset, positionRef.current.z); // Look slightly higher
 
         // Animate sprite sheet if talking
         if (isTalking && micTexture) {
