@@ -42,6 +42,68 @@ interface RemoteStream {
 // Animation types that can be triggered
 type AnimationType = 'jump' | 'wave' | 'dance' | null;
 
+// Streaming Screen component - displays video stream as a 3D texture
+function StreamingScreen({ videoStream }: { videoStream: MediaStream }) {
+    const [videoTexture, setVideoTexture] = useState<THREE.VideoTexture | null>(null);
+    const meshRef = useRef<THREE.Mesh>(null);
+
+    useEffect(() => {
+        // Create video element and set up stream
+        const video = document.createElement('video');
+        video.playsInline = true;
+        video.muted = true;
+        video.autoplay = true;
+        video.srcObject = videoStream;
+
+        // Wait for video to be ready
+        video.onloadedmetadata = () => {
+            video.play().then(() => {
+                // Create texture from video
+                const texture = new THREE.VideoTexture(video);
+                texture.minFilter = THREE.LinearFilter;
+                texture.magFilter = THREE.LinearFilter;
+                texture.format = THREE.RGBAFormat;
+                setVideoTexture(texture);
+            }).catch(err => {
+                console.error('Error playing video:', err);
+            });
+        };
+
+        return () => {
+            video.pause();
+            video.srcObject = null;
+            if (videoTexture) {
+                videoTexture.dispose();
+            }
+        };
+    }, [videoStream]);
+
+    // Update texture every frame
+    useFrame(() => {
+        if (videoTexture) {
+            videoTexture.needsUpdate = true;
+        }
+    });
+
+    if (!videoTexture) return null;
+
+    return (
+        <group position={[0, -0.1, 0.35]} rotation={[1.22, Math.PI, 0]}>
+            {/* Thick black tablet body */}
+            <mesh position={[0, 0, -0.025]}>
+                <boxGeometry args={[0.6, 0.38, 0.05]} />
+                <meshBasicMaterial color="#000000" />
+            </mesh>
+
+            {/* Video screen on front face */}
+            <mesh ref={meshRef} position={[0, 0, 0.001]}>
+                <planeGeometry args={[0.52, 0.3]} />
+                <meshBasicMaterial map={videoTexture} side={THREE.DoubleSide} />
+            </mesh>
+        </group>
+    );
+}
+
 // Shared animation logic hook
 function usePlayerAnimation() {
     const animationProgress = useRef(0);
@@ -255,7 +317,7 @@ function AvatarMesh({
 }
 
 // Player avatar component with animation support
-function PlayerAvatar({ player, animation, isTalking, audioStream }: { player: PlayerData; animation: AnimationType; isTalking?: boolean; audioStream?: MediaStream }) {
+function PlayerAvatar({ player, animation, isTalking, audioStream, videoStream, localPlayerPosition }: { player: PlayerData; animation: AnimationType; isTalking?: boolean; audioStream?: MediaStream; videoStream?: MediaStream; localPlayerPosition?: THREE.Vector3 }) {
     const groupRef = useRef<THREE.Group>(null);
     const { triggerAnimation, updateAnimation } = usePlayerAnimation();
     const micTexture = useTexture('/assets/textures/mic-talking-indicator_sprite_sheet.png');
@@ -310,6 +372,9 @@ function PlayerAvatar({ player, animation, isTalking, audioStream }: { player: P
                 playerName={player.name}
             />
 
+            {/* Streaming Screen - floating video display */}
+            {videoStream && <StreamingScreen videoStream={videoStream} />}
+
             {/* Talking indicator */}
             {isTalking && (
                 <Billboard position={[0, 1.6, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
@@ -336,10 +401,11 @@ function PlayerAvatar({ player, animation, isTalking, audioStream }: { player: P
             </Billboard>
 
             {/* Spatial audio */}
-            {audioStream && groupRef.current && (
+            {audioStream && groupRef.current && localPlayerPosition && (
                 <SpatialAudio
                     audioStream={audioStream}
                     targetPosition={groupRef.current.position}
+                    localPlayerPosition={localPlayerPosition}
                     playerId={player.id}
                     soundRadius={20}
                 />
@@ -1135,6 +1201,18 @@ function RoomPage() {
                                 return playerId === player.id;
                             })?.stream;
 
+                            // Find video stream for this player
+                            const videoStream = remoteStreams.find((stream) => {
+                                if (stream.kind !== 'video') return false;
+                                const playerId = publisherToPlayerRef.current.get(stream.publisherId);
+                                return playerId === player.id;
+                            })?.stream;
+
+                            // Convert local player position to THREE.Vector3
+                            const localPlayerPos = localPlayer
+                                ? new THREE.Vector3(localPlayer.position.x, localPlayer.position.y, localPlayer.position.z)
+                                : undefined;
+
                             return (
                                 <PlayerAvatar
                                     key={player.id}
@@ -1142,6 +1220,8 @@ function RoomPage() {
                                     animation={playerAnimations[player.id] || null}
                                     isTalking={isTalking}
                                     audioStream={audioStream}
+                                    videoStream={videoStream}
+                                    localPlayerPosition={localPlayerPos}
                                 />
                             );
                         })}
