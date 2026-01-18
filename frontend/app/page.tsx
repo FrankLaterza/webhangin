@@ -1,13 +1,14 @@
 'use client';
 
-import { useEffect, useState, useMemo, useRef, ComponentProps, Suspense } from 'react';
+import { useEffect, useState, useMemo, useRef, Suspense } from 'react';
 import { useRouter } from 'next/navigation';
-import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { useFrame, useThree } from '@react-three/fiber';
 import { useGLTF, useTexture, useAnimations } from '@react-three/drei';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import * as THREE from 'three';
 import localFont from 'next/font/local';
 import { AnimaleseSpeechBubble, getRandomPhrase } from './AnimaleseSpeechBubble';
+import { PixelArtCanvas } from './components/PixelArtCanvas';
 
 // Load custom font for character creation page
 const thinSans = localFont({
@@ -16,44 +17,8 @@ const thinSans = localFont({
 });
 
 // ============================================================================
-// PIXEL ART RENDERING UTILITIES
+// PIXEL ART TEXTURE UTILITIES
 // ============================================================================
-
-/**
- * PixelArtCanvas - A drop-in replacement for Canvas with pixel art rendering.
- * Renders at low resolution and scales up with nearest-neighbor filtering.
- *
- * @param pixelSize - Controls pixel size (lower = bigger pixels). Default: 0.25
- *
- * @example
- * <PixelArtCanvas pixelSize={0.25} camera={{ position: [0, 0, 5] }}>
- *   <mesh>...</mesh>
- * </PixelArtCanvas>
- */
-type PixelArtCanvasProps = Omit<ComponentProps<typeof Canvas>, 'dpr' | 'gl'> & {
-  pixelSize?: number;
-};
-
-function PixelArtCanvas({
-  children,
-  pixelSize = 0.25,
-  style,
-  ...props
-}: PixelArtCanvasProps) {
-  return (
-    <Canvas
-      {...props}
-      dpr={pixelSize}
-      gl={{ antialias: false }}
-      style={{
-        imageRendering: 'pixelated',
-        ...style
-      }}
-    >
-      {children}
-    </Canvas>
-  );
-}
 
 /**
  * usePixelTexture - Hook to load a texture with pixel art settings (no antialiasing).
@@ -960,7 +925,7 @@ export default function Home() {
 
         {/* Facial Features */}
         <div className="space-y-3">
-          <h3 className="text-xs font-semibold text-black uppercase tracking-wider mb-2">Customize Face</h3>
+          <h3 className="block text-xs font-medium text-black mb-1">Customize Face</h3>
 
           <FeatureSelector
             label="Eyes"

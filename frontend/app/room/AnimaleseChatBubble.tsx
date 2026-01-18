@@ -145,7 +145,8 @@ export function AnimaleseChatBubble({ message, timestamp, position = [0, 1.5, 0]
                 <meshBasicMaterial color="#222222" opacity={0.95} transparent depthWrite={false} />
             </mesh>
             <Text
-                fontSize={0.18}
+                font="/assets/ThinSans.ttf"
+                fontSize={0.10}
                 color="white"
                 anchorX="center"
                 anchorY="middle"

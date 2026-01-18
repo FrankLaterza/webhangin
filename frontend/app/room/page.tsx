@@ -2,15 +2,23 @@
 
 import { useEffect, useRef, useState, Suspense, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { useFrame, useThree } from '@react-three/fiber';
 import { Text, Billboard, useTexture, useGLTF, useAnimations } from '@react-three/drei';
 import { PublishTransport, SubscribeTransport } from 'rheomesh';
 import * as THREE from 'three';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+import localFont from 'next/font/local';
 import { SpatialAudio } from './SpatialAudio';
 import { SplatViewer } from './SplatViewer';
-import { RoomEffects } from './RoomEffects';
 import { AnimaleseChatBubble } from './AnimaleseChatBubble';
+import { PixelArtCanvas } from '../components/PixelArtCanvas';
+import { NineSliceBox, NineSliceButton, NineSliceLink } from '../components/NineSliceBox';
+
+// Load custom font
+const thinSans = localFont({
+    src: '../../public/assets/ThinSans.ttf',
+    variable: '--font-thin-sans',
+});
 
 interface Position {
     x: number;
@@ -263,6 +271,82 @@ function useCharacterAnimations(
     }, [actions, mixer, animation, isMoving, playerName]);
 }
 
+// GLSL code for dithering fade effect (Bayer 4x4 matrix)
+const ditherFadeFragmentGLSL = `
+// Bayer 4x4 dithering matrix
+float bayerMatrix[16] = float[16](
+    0.0/16.0, 8.0/16.0, 2.0/16.0, 10.0/16.0,
+    12.0/16.0, 4.0/16.0, 14.0/16.0, 6.0/16.0,
+    3.0/16.0, 11.0/16.0, 1.0/16.0, 9.0/16.0,
+    15.0/16.0, 7.0/16.0, 13.0/16.0, 5.0/16.0
+);
+
+float getDitherThreshold(vec2 screenPos) {
+    int x = int(mod(screenPos.x, 4.0));
+    int y = int(mod(screenPos.y, 4.0));
+    return bayerMatrix[y * 4 + x];
+}
+`;
+
+// Apply dithering fade effect to a MeshStandardMaterial
+function applyDitherFade(material: THREE.MeshStandardMaterial, fadeStart: number, fadeEnd: number) {
+    material.onBeforeCompile = (shader) => {
+        // Add uniforms
+        shader.uniforms.uFadeStart = { value: fadeStart };
+        shader.uniforms.uFadeEnd = { value: fadeEnd };
+
+        // Add varying for per-fragment view position (vertex shader)
+        shader.vertexShader = shader.vertexShader.replace(
+            '#include <common>',
+            `#include <common>
+            varying vec3 vDitherViewPos;
+            `
+        );
+
+        // Set the varying in vertex shader (after modelViewMatrix transform)
+        shader.vertexShader = shader.vertexShader.replace(
+            '#include <fog_vertex>',
+            `#include <fog_vertex>
+            vDitherViewPos = (modelViewMatrix * vec4(transformed, 1.0)).xyz;
+            `
+        );
+
+        // Declare varying and dithering functions in fragment shader
+        shader.fragmentShader = shader.fragmentShader.replace(
+            '#include <common>',
+            `#include <common>
+            varying vec3 vDitherViewPos;
+            uniform float uFadeStart;
+            uniform float uFadeEnd;
+            ${ditherFadeFragmentGLSL}
+            `
+        );
+
+        // Add dithering discard logic at the end of the fragment shader
+        shader.fragmentShader = shader.fragmentShader.replace(
+            '#include <dithering_fragment>',
+            `#include <dithering_fragment>
+
+            // Calculate per-fragment distance from camera
+            float camDist = length(vDitherViewPos);
+
+            // Calculate fade amount (1.0 = fully visible, 0.0 = fully faded)
+            float fadeAmount = smoothstep(uFadeEnd, uFadeStart, camDist);
+
+            // Apply dithering based on screen position
+            vec2 screenPos = gl_FragCoord.xy;
+            float ditherThreshold = getDitherThreshold(screenPos);
+
+            // Discard fragment if at or below threshold (ensures full transparency at FADE_END)
+            if (fadeAmount <= ditherThreshold) {
+                discard;
+            }
+            `
+        );
+    };
+    material.needsUpdate = true;
+}
+
 // Cat Avatar Component
 function CatAvatar({
     facialFeatures,
@@ -270,7 +354,8 @@ function CatAvatar({
     animation,
     isMoving,
     playerName,
-    isFirstPerson
+    isFirstPerson,
+    cameraDistance
 }: {
     facialFeatures: FacialFeatures;
     color: string;
@@ -278,6 +363,7 @@ function CatAvatar({
     isMoving: boolean;
     playerName: string;
     isFirstPerson?: boolean;
+    cameraDistance?: number;
 }) {
     const { scene, animations } = useGLTF('/assets/models/TWISTED_cat_character.glb');
     // Clone scene using SkeletonUtils to properly handle SkinnedMeshes (animations)
@@ -304,9 +390,19 @@ function CatAvatar({
     );
 
     // GLB models from Blender typically need flipY = false
+    // Apply pixel art settings for crisp rendering
     eyeTexture.flipY = false;
+    eyeTexture.minFilter = THREE.NearestFilter;
+    eyeTexture.magFilter = THREE.NearestFilter;
+    eyeTexture.generateMipmaps = false;
     noseTexture.flipY = false;
+    noseTexture.minFilter = THREE.NearestFilter;
+    noseTexture.magFilter = THREE.NearestFilter;
+    noseTexture.generateMipmaps = false;
     mouthTexture.flipY = false;
+    mouthTexture.minFilter = THREE.NearestFilter;
+    mouthTexture.magFilter = THREE.NearestFilter;
+    mouthTexture.generateMipmaps = false;
 
     // Apply textures and colors to named meshes
     useEffect(() => {
@@ -352,6 +448,22 @@ function CatAvatar({
         });
     }, [clone, color, eyeTexture, noseTexture, mouthTexture]);
 
+    // Apply dithering fade effect for local player (when cameraDistance is defined)
+    useEffect(() => {
+        if (cameraDistance === undefined) return; // Only for local player
+
+        // Dither fade parameters: start fading earlier, fully transparent when very close
+        // Start fading at 1.2 units, fully faded at 0.15 units
+        const FADE_START = 1.5;
+        const FADE_END = 0.4;
+
+        clone.traverse((child) => {
+            if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshStandardMaterial) {
+                applyDitherFade(child.material, FADE_START, FADE_END);
+            }
+        });
+    }, [clone, cameraDistance !== undefined]);
+
     // Handle Head Visibility for First Person View
     useEffect(() => {
         const headBone = clone.getObjectByName('Head') || clone.getObjectByName('head');
@@ -383,7 +495,8 @@ function DogAvatar({
     animation,
     isMoving,
     playerName,
-    isFirstPerson
+    isFirstPerson,
+    cameraDistance
 }: {
     facialFeatures: FacialFeatures;
     color: string;
@@ -391,6 +504,7 @@ function DogAvatar({
     isMoving: boolean;
     playerName: string;
     isFirstPerson?: boolean;
+    cameraDistance?: number;
 }) {
     const { scene, animations } = useGLTF('/assets/models/TWISTED_dog_character.glb');
     const clone = useMemo(() => {
@@ -412,8 +526,15 @@ function DogAvatar({
         `/assets/textures/character_facial_textures/nose/${facialFeatures.noseStyle}.png`
     );
 
+    // Apply pixel art settings for crisp rendering
     eyeTexture.flipY = false;
+    eyeTexture.minFilter = THREE.NearestFilter;
+    eyeTexture.magFilter = THREE.NearestFilter;
+    eyeTexture.generateMipmaps = false;
     noseTexture.flipY = false;
+    noseTexture.minFilter = THREE.NearestFilter;
+    noseTexture.magFilter = THREE.NearestFilter;
+    noseTexture.generateMipmaps = false;
 
     // Apply textures and colors to named meshes
     useEffect(() => {
@@ -449,6 +570,22 @@ function DogAvatar({
         });
     }, [clone, color, eyeTexture, noseTexture]);
 
+    // Apply dithering fade effect for local player (when cameraDistance is defined)
+    useEffect(() => {
+        if (cameraDistance === undefined) return; // Only for local player
+
+        // Dither fade parameters: start fading earlier, fully transparent when very close
+        // Start fading at 1.2 units, fully faded at 0.15 units
+        const FADE_START = 1.2;
+        const FADE_END = 0.15;
+
+        clone.traverse((child) => {
+            if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshStandardMaterial) {
+                applyDitherFade(child.material, FADE_START, FADE_END);
+            }
+        });
+    }, [clone, cameraDistance !== undefined]);
+
     // Hide in first person
     useEffect(() => {
         clone.visible = !isFirstPerson;
@@ -467,7 +604,8 @@ function AvatarMesh({
     animation,
     isMoving,
     playerName,
-    isFirstPerson
+    isFirstPerson,
+    cameraDistance
 }: {
     facialFeatures: FacialFeatures;
     color: string;
@@ -475,6 +613,7 @@ function AvatarMesh({
     isMoving: boolean;
     playerName: string;
     isFirstPerson?: boolean;
+    cameraDistance?: number;
 }) {
     if (facialFeatures.characterType === 'dog') {
         return (
@@ -485,6 +624,7 @@ function AvatarMesh({
                 isMoving={isMoving}
                 playerName={playerName}
                 isFirstPerson={isFirstPerson}
+                cameraDistance={cameraDistance}
             />
         );
     }
@@ -496,6 +636,7 @@ function AvatarMesh({
             isMoving={isMoving}
             playerName={playerName}
             isFirstPerson={isFirstPerson}
+            cameraDistance={cameraDistance}
         />
     );
 }
@@ -506,12 +647,16 @@ function PlayerAvatar({ player, animation, isTalking, audioStream, videoStream, 
     const { triggerAnimation, updateAnimation } = usePlayerAnimation();
     const micTexture = useTexture('/assets/textures/mic-talking-indicator_sprite_sheet.png');
 
-    // Configure sprite sheet texture
+    // Configure sprite sheet texture with pixel art settings
     useEffect(() => {
         if (micTexture) {
             micTexture.wrapS = THREE.RepeatWrapping;
             micTexture.repeat.set(0.5, 1); // Show half of the texture (one frame)
             micTexture.offset.set(0, 0);
+            // Crisp pixel rendering
+            micTexture.minFilter = THREE.NearestFilter;
+            micTexture.magFilter = THREE.NearestFilter;
+            micTexture.generateMipmaps = false;
         }
     }, [micTexture]);
 
@@ -575,10 +720,14 @@ function PlayerAvatar({ player, animation, isTalking, audioStream, videoStream, 
 
             <Billboard position={[0, 1, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
                 <Text
-                    fontSize={0.3}
+                    font="/assets/ThinSans.ttf"
+                    fontSize={0.15}
                     color="white"
                     anchorX="center"
                     anchorY="bottom"
+                    sdfGlyphSize={128}
+                    outlineWidth={0.012}
+                    outlineColor="#000000"
                 >
                     {player.name}
                 </Text>
@@ -639,21 +788,28 @@ function LocalPlayer({
     const { triggerAnimation, updateAnimation, cancelAnimation, currentAnimation } = usePlayerAnimation();
     const micTexture = useTexture('/assets/textures/mic-talking-indicator_sprite_sheet.png');
 
-    // Configure sprite sheet texture
+    // Configure sprite sheet texture with pixel art settings
     useEffect(() => {
         if (micTexture) {
             micTexture.wrapS = THREE.RepeatWrapping;
             micTexture.repeat.set(0.5, 1);
             micTexture.offset.set(0, 0);
+            // Crisp pixel rendering
+            micTexture.minFilter = THREE.NearestFilter;
+            micTexture.magFilter = THREE.NearestFilter;
+            micTexture.generateMipmaps = false;
         }
     }, [micTexture]);
 
-    // Camera Orbit State
-    const cameraOffset = useRef({ azimuth: 0, elevation: 0, radius: 5 });
+    // Camera Orbit State (absolute world azimuth, not relative to player)
+    const DEFAULT_CAMERA = { azimuth: 0, elevation: 0.3, radius: 5 };
+
+    const cameraOffset = useRef({ ...DEFAULT_CAMERA });
+    const targetCameraOffset = useRef({ ...DEFAULT_CAMERA });
     const isOrbiting = useRef(false);
-    const lastMouseRatio = useRef({ x: 0, y: 0 }); // Fallback if movementX fails? No, let's stick to movement
-    // Actually, manual diff is safer if movementX is acting up.
     const lastMousePos = useRef({ x: 0, y: 0 });
+    const wasFirstPersonRef = useRef(false); // Track first-person state transitions
+    const isPointerLocked = useRef(false);
 
     // Mouse Listeners for Camera Orbit
     useEffect(() => {
@@ -678,6 +834,26 @@ function LocalPlayer({
         };
 
         const handlePointerMove = (e: PointerEvent) => {
+            // Handle pointer lock mouse movement for first-person
+            if (isPointerLocked.current) {
+                const sensitivity = 0.003;
+
+                // Apply directly to both current and target for immediate 1:1 response (no acceleration/smoothing)
+                const newAzimuth = cameraOffset.current.azimuth - e.movementX * sensitivity;
+                const newElevation = cameraOffset.current.elevation - e.movementY * sensitivity;
+
+                // Clamp elevation to avoid flipping
+                const limit = Math.PI / 2 - 0.1;
+                const clampedElevation = Math.max(-limit, Math.min(limit, newElevation));
+
+                // Set both current and target to same value for instant response
+                cameraOffset.current.azimuth = newAzimuth;
+                cameraOffset.current.elevation = clampedElevation;
+                targetCameraOffset.current.azimuth = newAzimuth;
+                targetCameraOffset.current.elevation = clampedElevation;
+                return;
+            }
+
             if (!isOrbiting.current) return;
             e.preventDefault();
 
@@ -686,37 +862,45 @@ function LocalPlayer({
             const deltaY = e.clientY - lastMousePos.current.y;
             lastMousePos.current = { x: e.clientX, y: e.clientY };
 
-            // console.log(`🖱️ Orbiting: dx=${deltaX}, dy=${deltaY}, az=${cameraOffset.current.azimuth.toFixed(2)}`);
-
-            // Adjust sensitivity
+            // Adjust sensitivity - REVERSE azimuth direction (drag right = rotate left)
             const sensitivity = 0.02;
-            cameraOffset.current.azimuth += deltaX * sensitivity;
-            cameraOffset.current.elevation += deltaY * sensitivity;
+            targetCameraOffset.current.azimuth -= deltaX * sensitivity;
+            targetCameraOffset.current.elevation += deltaY * sensitivity;
 
             // Clamp elevation to avoid flipping (e.g., -80 to 80 degrees)
             const limit = Math.PI / 2 - 0.1;
-            cameraOffset.current.elevation = Math.max(-limit, Math.min(limit, cameraOffset.current.elevation));
+            targetCameraOffset.current.elevation = Math.max(-limit, Math.min(limit, targetCameraOffset.current.elevation));
         };
 
         const handleWheel = (e: WheelEvent) => {
-            // Zoom
+            // Zoom - move closer/further from character
             e.preventDefault();
             const zoomSpeed = 0.005;
-            cameraOffset.current.radius += e.deltaY * zoomSpeed;
-            // Clamp radius
-            cameraOffset.current.radius = Math.max(2, Math.min(20, cameraOffset.current.radius));
+            targetCameraOffset.current.radius += e.deltaY * zoomSpeed;
+            // Clamp radius - minimum 0.5 allows smooth transition to first person
+            targetCameraOffset.current.radius = Math.max(0.5, Math.min(20, targetCameraOffset.current.radius));
+        };
+
+        // Pointer lock change handler
+        const handlePointerLockChange = () => {
+            isPointerLocked.current = document.pointerLockElement === domElement;
+            if (!isPointerLocked.current) {
+                domElement.style.cursor = 'auto';
+            }
         };
 
         domElement.addEventListener('pointerdown', handlePointerDown);
         domElement.addEventListener('pointerup', handlePointerUp);
         domElement.addEventListener('pointermove', handlePointerMove);
         domElement.addEventListener('wheel', handleWheel, { passive: false });
+        document.addEventListener('pointerlockchange', handlePointerLockChange);
 
         return () => {
             domElement.removeEventListener('pointerdown', handlePointerDown);
             domElement.removeEventListener('pointerup', handlePointerUp);
             domElement.removeEventListener('pointermove', handlePointerMove);
             domElement.removeEventListener('wheel', handleWheel);
+            document.removeEventListener('pointerlockchange', handlePointerLockChange);
             domElement.style.cursor = 'auto';
         };
     }, [gl]);
@@ -726,9 +910,13 @@ function LocalPlayer({
             keysPressed.current.add(e.key.toLowerCase());
             if (e.key === ' ') keysPressed.current.add(' ');
 
-            // Reset Camera
+            // Reset Camera (position behind player's current facing direction)
             if (e.key.toLowerCase() === 't') {
-                cameraOffset.current = { azimuth: 0, elevation: 0, radius: 5 };
+                targetCameraOffset.current = {
+                    azimuth: rotationRef.current, // Behind player's facing direction
+                    elevation: DEFAULT_CAMERA.elevation,
+                    radius: DEFAULT_CAMERA.radius
+                };
             }
 
             // Toggle First Person
@@ -757,17 +945,11 @@ function LocalPlayer({
         };
     }, []);
 
-    // Track inputs
-    const forward = keysPressed.current.has('w');
-    const backward = keysPressed.current.has('s');
-    const left = keysPressed.current.has('a');
-    const right = keysPressed.current.has('d');
-    const jump = keysPressed.current.has(' ');
-
     // Track movement state
     const [isMoving, setIsMoving] = useState(false);
     const isMovingRef = useRef(false);
     const wasMovingRef = useRef(false);
+    const lastSentRotationRef = useRef(0); // Track last rotation sent to server
     const [isFirstPerson, setIsFirstPerson] = useState(false);
 
     // Initial movement injection ("W tap" workaround for T-pose)
@@ -790,31 +972,50 @@ function LocalPlayer({
         if (chatInputFocused) return; // Block movement while typing
 
         const speed = 5 * delta;
-        const rotSpeed = 2 * delta;
+        const turnSpeed = 8 * delta; // Rotation speed for smooth turning
         let moved = false;
-
 
         // W-tap injection
         if (initialInjection) {
             moved = true;
         }
 
-        // Rotation
+        // Calculate camera-relative directions based on camera orbit position
+        // The camera orbits at angle (playerRotation + PI + cameraAzimuth) from player
+        // So "forward" from camera's perspective is (playerRotation + cameraAzimuth)
+        // But we want movement relative to camera view, independent of player rotation
+        // Use only the camera azimuth offset to determine movement direction
+        const moveAzimuth = cameraOffset.current.azimuth;
+
+        // Camera forward direction on XZ plane (based on camera orbit, not player rotation)
+        const cameraForward = new THREE.Vector3(
+            Math.sin(moveAzimuth),
+            0,
+            Math.cos(moveAzimuth)
+        );
+
+        // Camera right direction (perpendicular to forward)
+        const cameraRight = new THREE.Vector3(
+            Math.sin(moveAzimuth + Math.PI / 2),
+            0,
+            Math.cos(moveAzimuth + Math.PI / 2)
+        );
+
+        // Build movement direction from input
+        const moveDirection = new THREE.Vector3(0, 0, 0);
+
+        if (keysPressed.current.has('w')) {
+            moveDirection.add(cameraForward);
+        }
+        if (keysPressed.current.has('s')) {
+            moveDirection.sub(cameraForward);
+        }
         if (keysPressed.current.has('a')) {
-            rotationRef.current += rotSpeed;
-            moved = true;
+            moveDirection.add(cameraRight); // Strafe left
         }
         if (keysPressed.current.has('d')) {
-            rotationRef.current -= rotSpeed;
-            moved = true;
+            moveDirection.sub(cameraRight); // Strafe right
         }
-
-        // Forward/backward movement based on rotation
-        const direction = new THREE.Vector3(
-            Math.sin(rotationRef.current),
-            0,
-            Math.cos(rotationRef.current)
-        );
 
         // Collision Check Helper
         const canMove = (dir: THREE.Vector3) => {
@@ -831,20 +1032,28 @@ function LocalPlayer({
             return !intersects.some(hit => hit.distance < 0.8);
         };
 
-        if (keysPressed.current.has('w')) {
-            if (canMove(direction)) {
-                positionRef.current.x += direction.x * speed;
-                positionRef.current.z += direction.z * speed;
+        // Apply movement if there's input
+        if (moveDirection.lengthSq() > 0) {
+            moveDirection.normalize();
+
+            // Check collision before moving
+            if (canMove(moveDirection)) {
+                positionRef.current.x += moveDirection.x * speed;
+                positionRef.current.z += moveDirection.z * speed;
                 moved = true;
-            }
-        }
-        if (keysPressed.current.has('s')) {
-            // Backward check (invert direction)
-            const backDir = direction.clone().negate();
-            if (canMove(backDir)) {
-                positionRef.current.x -= direction.x * speed;
-                positionRef.current.z -= direction.z * speed;
-                moved = true;
+
+                // Calculate target rotation to face movement direction
+                const targetRotation = Math.atan2(moveDirection.x, moveDirection.z);
+
+                // Smoothly interpolate rotation towards target
+                let rotationDiff = targetRotation - rotationRef.current;
+
+                // Normalize rotation difference to [-PI, PI]
+                while (rotationDiff > Math.PI) rotationDiff -= Math.PI * 2;
+                while (rotationDiff < -Math.PI) rotationDiff += Math.PI * 2;
+
+                // Apply smooth rotation
+                rotationRef.current += rotationDiff * turnSpeed;
             }
         }
 
@@ -982,50 +1191,78 @@ function LocalPlayer({
         groupRef.current.rotation.y = rotationRef.current;
 
         // --- CAMERA LOGIC ---
-        if (isFirstPerson) {
-            // First Person Logic
-            // Position: Eye level (Model is scaled 0.5, feet at -0.5. Head approx at 0.5. Eyes ~0.4)
-            // Forward Offset to avoid chest clipping
-            const forwardOffset = 0.25;
-            const eyeY = positionRef.current.y + 0.4 + heightOffset;
 
-            const camX = positionRef.current.x + Math.sin(rotationRef.current) * forwardOffset;
-            const camZ = positionRef.current.z + Math.cos(rotationRef.current) * forwardOffset;
+        // Smoothly interpolate current camera offset toward target (no auto-easing to default)
+        cameraOffset.current.azimuth += (targetCameraOffset.current.azimuth - cameraOffset.current.azimuth) * 0.1;
+        cameraOffset.current.elevation += (targetCameraOffset.current.elevation - cameraOffset.current.elevation) * 0.1;
+        cameraOffset.current.radius += (targetCameraOffset.current.radius - cameraOffset.current.radius) * 0.1;
 
-            camera.position.set(camX, eyeY, camZ);
+        // First-person pivot point (inside head at eye level)
+        const forwardOffset = 0; // Camera inside head, not in front
+        const eyeY = positionRef.current.y + 0.25 + heightOffset; // Lowered for true eye level
+        const pivotX = positionRef.current.x + Math.sin(rotationRef.current) * forwardOffset;
+        const pivotZ = positionRef.current.z + Math.cos(rotationRef.current) * forwardOffset;
 
-            // Look Direction
-            // Yaw: rotationRef.current (Model forward)
-            // Pitch: cameraOffset.current.elevation
-            const yaw = rotationRef.current;
+        const radius = cameraOffset.current.radius;
+        const FIRST_PERSON_THRESHOLD = 1.0;
+
+        // Check if zoomed in enough for first-person (or manually toggled)
+        const effectiveFirstPerson = isFirstPerson || radius < FIRST_PERSON_THRESHOLD;
+
+        // Detect transition INTO first-person
+        if (effectiveFirstPerson && !wasFirstPersonRef.current) {
+            // Snap character rotation to camera's current world-facing direction
+            // The camera's world azimuth is cameraOffset.current.azimuth
+            rotationRef.current = cameraOffset.current.azimuth;
+
+            // Request pointer lock for mouse look
+            gl.domElement.requestPointerLock?.();
+        }
+
+        // Detect transition OUT OF first-person
+        if (!effectiveFirstPerson && wasFirstPersonRef.current) {
+            // Release pointer lock
+            if (document.pointerLockElement) {
+                document.exitPointerLock?.();
+            }
+        }
+
+        // Update first-person state tracker
+        wasFirstPersonRef.current = effectiveFirstPerson;
+
+        if (effectiveFirstPerson) {
+            // First Person Logic - camera at eye level
+            camera.position.set(pivotX, eyeY, pivotZ);
+
+            // In first-person, character rotation follows camera azimuth
+            rotationRef.current = cameraOffset.current.azimuth;
+
+            // Look Direction based on camera azimuth (which now equals character rotation)
+            const yaw = cameraOffset.current.azimuth;
             const pitch = cameraOffset.current.elevation;
 
             // Look at point at distance
             const lookDist = 5;
-            const lookX = camX + lookDist * Math.sin(yaw) * Math.cos(pitch);
-            const lookZ = camZ + lookDist * Math.cos(yaw) * Math.cos(pitch);
+            const lookX = pivotX + lookDist * Math.sin(yaw) * Math.cos(pitch);
+            const lookZ = pivotZ + lookDist * Math.cos(yaw) * Math.cos(pitch);
             const lookY = eyeY + lookDist * Math.sin(pitch);
 
             camera.lookAt(lookX, lookY, lookZ);
         } else {
             // Third Person Orbit Logic
-            // Calculate orbit position
-            // Default: Behind player (rotationRef.current + PI)
-            // Offset: cameraOffset.current.azimuth
-            const totalAzimuth = rotationRef.current + Math.PI + cameraOffset.current.azimuth;
+            // Camera uses ABSOLUTE world azimuth (doesn't follow player rotation)
+            const totalAzimuth = Math.PI + cameraOffset.current.azimuth;
             const totalElevation = cameraOffset.current.elevation;
 
-            // Spherical to Cartesian
-            // Radius = 5 (Dynamic)
-            const radius = cameraOffset.current.radius;
-            // y is Up.
-            const camX = positionRef.current.x + radius * Math.sin(totalAzimuth) * Math.cos(totalElevation);
-            const camZ = positionRef.current.z + radius * Math.cos(totalAzimuth) * Math.cos(totalElevation);
-            const camY = positionRef.current.y + 3 + heightOffset * 0.5 + (radius * Math.sin(totalElevation));
+            // Spherical to Cartesian - camera orbits around the pivot point
+            const horizontalDist = radius * Math.cos(totalElevation);
+            const camX = positionRef.current.x + horizontalDist * Math.sin(totalAzimuth);
+            const camZ = positionRef.current.z + horizontalDist * Math.cos(totalAzimuth);
+            const camY = eyeY + radius * Math.sin(totalElevation);
 
             // Update camera to follow
             camera.position.set(camX, camY, camZ);
-            camera.lookAt(positionRef.current.x, positionRef.current.y + heightOffset, positionRef.current.z); // Look slightly higher
+            camera.lookAt(positionRef.current.x, eyeY, positionRef.current.z);
         }
 
         // Animate sprite sheet if talking
@@ -1033,11 +1270,13 @@ function LocalPlayer({
             micTexture.offset.x = Math.floor(Date.now() / 200) % 2 * 0.5;
         }
 
-        // Send position update if moved OR if moving state changed (e.g. stopped)
-        // We track previous moving state to ensure we send the "stop" event
-        if (moved || isMovingRef.current !== wasMovingRef.current) {
+        // Send position update if moved OR if moving state changed OR if rotation changed significantly
+        // This ensures other players see rotation changes in first-person mode
+        const rotationChanged = Math.abs(rotationRef.current - lastSentRotationRef.current) > 0.01;
+        if (moved || isMovingRef.current !== wasMovingRef.current || rotationChanged) {
             onMove({ ...positionRef.current }, rotationRef.current, isMovingRef.current);
             wasMovingRef.current = isMovingRef.current;
+            lastSentRotationRef.current = rotationRef.current;
         }
     });
 
@@ -1050,6 +1289,7 @@ function LocalPlayer({
                 isMoving={isMoving}
                 playerName={player.name}
                 isFirstPerson={isFirstPerson}
+                cameraDistance={cameraOffset.current.radius}
             />
 
             {/* Streaming Screen - floating video display */}
@@ -1072,10 +1312,14 @@ function LocalPlayer({
             {!isFirstPerson && (
                 <Billboard position={[0, 1, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
                     <Text
-                        fontSize={0.3}
+                        font="/assets/ThinSans.ttf"
+                        fontSize={0.15}
                         color="white"
                         anchorX="center"
                         anchorY="bottom"
+                        sdfGlyphSize={128}
+                        outlineWidth={0.012}
+                        outlineColor="#000000"
                     >
                         {player.name} (you)
                     </Text>
@@ -1099,6 +1343,10 @@ function RoomFloor() {
     const floorTexture = useTexture('/assets/textures/floor_texture_v1.png');
     floorTexture.wrapS = floorTexture.wrapT = THREE.RepeatWrapping;
     floorTexture.repeat.set(1, 1);
+    // Crisp pixel rendering
+    floorTexture.minFilter = THREE.NearestFilter;
+    floorTexture.magFilter = THREE.NearestFilter;
+    floorTexture.generateMipmaps = false;
 
     return (
         <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.5, 0]}>
@@ -1113,6 +1361,10 @@ function RoomWalls() {
     const wallTexture = useTexture('/assets/textures/wall_texture_v1.png');
     wallTexture.wrapS = wallTexture.wrapT = THREE.RepeatWrapping;
     wallTexture.repeat.set(1, 1);
+    // Crisp pixel rendering
+    wallTexture.minFilter = THREE.NearestFilter;
+    wallTexture.magFilter = THREE.NearestFilter;
+    wallTexture.generateMipmaps = false;
 
     return (
         <group position={[0, 2.5, 0]}>
@@ -2254,12 +2506,11 @@ function RoomPage() {
                     to { background-position: 100% 0; }
                 }
             `}</style>
-            <div className="h-screen w-screen bg-gray-900 flex">
+            <div className={`h-screen w-screen bg-gray-900 flex ${thinSans.className}`}>
                 {/* 3D Room */}
                 <div className="flex-1 relative">
-                    <Canvas>
-                        <ambientLight intensity={0.4} />
-                        <pointLight position={[0, 4, 0]} intensity={108} />
+                    <PixelArtCanvas pixelSize={0.60} disabled={isCamping}>
+                        <ambientLight intensity={3.0} />
                         {isCamping ? (
                             <SplatViewer url="/assets/final.ply" position={[-4, -1.2, -4]} rotation={[1, -.015, 0, 0]} scale={[4, 4, 4]} />
                         ) : isCinema ? (
@@ -2335,72 +2586,56 @@ function RoomPage() {
                                 );
                             })}
                         </Suspense>
-                        <RoomEffects variant={isCamping ? 'camping' : 'default'} />
-                    </Canvas>
+                    </PixelArtCanvas>
 
                     {/* Room info overlay */}
-                    <div className="absolute top-4 left-4 bg-black/50 backdrop-blur-sm rounded-lg px-4 py-2">
-                        <h2 className="text-white font-bold">{roomTheme || 'Loading...'}</h2>
-                        <p className="text-gray-400 text-sm">{remotePlayers.length + 1} players</p>
+                    <NineSliceBox className="absolute top-4 left-4" padding="8px 12px">
+                        <h2 className="text-gray-800 font-bold text-sm">{roomTheme || 'Loading...'}</h2>
+                        <p className="text-gray-600 text-xs">{remotePlayers.length + 1} players</p>
                         <p className="text-gray-500 text-xs mt-1">WASD to move</p>
                         <p className="text-gray-500 text-xs mt-1">t to reset camera</p>
                         <p className="text-gray-500 text-xs mt-1">f to go first person</p>
-                    </div>
+                    </NineSliceBox>
 
                     {/* Back button */}
-                    <a href="/" className="absolute top-4 right-4 text-gray-400 hover:text-white">
-                        ← Leave Room
-                    </a>
+                    <NineSliceLink href="/" className="absolute top-4 right-4" padding="6px 12px">
+                        <span className="text-gray-700 text-xs">Leave Room</span>
+                    </NineSliceLink>
                 </div>
 
                 {/* Floating Controls (Screen Share / Mic) */}
                 <div className="absolute bottom-4 right-4 flex gap-2 z-20">
-                    <button
-                        onClick={startStreaming}
-                        className="py-2 px-4 bg-green-600 hover:bg-green-700 rounded text-sm text-white shadow-lg"
-                    >
-                        🎥 Share Screen
-                    </button>
-                    <button
-                        onClick={stopStreaming}
-                        className="py-2 px-4 bg-red-600 hover:bg-red-700 rounded text-sm text-white shadow-lg"
-                    >
-                        ⏹ Stop
-                    </button>
+                    <NineSliceButton onClick={startStreaming} padding="6px 12px">
+                        <span className="text-gray-700 text-xs">Share Screen</span>
+                    </NineSliceButton>
+                    <NineSliceButton onClick={stopStreaming} padding="6px 12px">
+                        <span className="text-gray-700 text-xs">Stop</span>
+                    </NineSliceButton>
                     {!isMicActive ? (
-                        <button
-                            onClick={startMicrophone}
-                            className="py-2 px-4 bg-blue-600 hover:bg-blue-700 rounded text-sm text-white shadow-lg"
-                        >
-                            🎤 Start Mic
-                        </button>
+                        <NineSliceButton onClick={startMicrophone} padding="6px 12px">
+                            <span className="text-gray-700 text-xs">Start Mic</span>
+                        </NineSliceButton>
                     ) : (
                         <>
-                            <button
-                                onClick={toggleMicMute}
-                                className={`py-2 px-4 rounded text-sm text-white shadow-lg ${isMicMuted ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'}`}
-                            >
-                                {isMicMuted ? '🔇 Unmute' : '🎤 Mute'}
-                            </button>
-                            <button
-                                onClick={stopMicrophone}
-                                className="py-2 px-4 bg-red-600 hover:bg-red-700 rounded text-sm text-white shadow-lg"
-                            >
-                                ⏹ Stop Mic
-                            </button>
+                            <NineSliceButton onClick={toggleMicMute} padding="6px 12px">
+                                <span className="text-gray-700 text-xs">{isMicMuted ? 'Unmute' : 'Mute'}</span>
+                            </NineSliceButton>
+                            <NineSliceButton onClick={stopMicrophone} padding="6px 12px">
+                                <span className="text-gray-700 text-xs">Stop Mic</span>
+                            </NineSliceButton>
                         </>
                     )}
                 </div>
 
                 {/* Semi-transparent Chat Overlay */}
                 <div className="absolute top-20 right-4 w-72 max-h-96 bg-black/50 backdrop-blur-sm rounded-lg p-3 flex flex-col z-10">
-                    <h3 className="text-white font-semibold mb-2">Chat</h3>
+                    <h3 className="text-white font-semibold text-sm mb-2">Chat</h3>
                     <div className="flex-1 overflow-y-auto space-y-1 max-h-60">
                         {chatMessages.length === 0 ? (
-                            <p className="text-gray-400 text-sm">No messages yet...</p>
+                            <p className="text-gray-400 text-xs">No messages yet...</p>
                         ) : (
                             chatMessages.slice(-20).map((msg, i) => (
-                                <div key={i} className="text-sm">
+                                <div key={i} className="text-xs">
                                     <span className="text-orange-400 font-medium">{msg.sender}:</span>{' '}
                                     <span className="text-gray-300">{msg.message}</span>
                                 </div>
@@ -2417,12 +2652,12 @@ function RoomPage() {
                             onBlur={() => setChatInputFocused(false)}
                             disabled={!isConnected}
                             placeholder="Type a message..."
-                            className="flex-1 px-3 py-2 bg-gray-700/80 border border-gray-600 rounded text-white text-sm placeholder-gray-400 disabled:opacity-50"
+                            className="flex-1 px-3 py-2 bg-gray-700/80 border border-gray-600 rounded text-white text-xs placeholder-gray-400 disabled:opacity-50"
                         />
                         <button
                             onClick={sendChat}
                             disabled={!isConnected}
-                            className="px-3 py-2 bg-blue-600 hover:bg-blue-700 rounded text-white text-sm disabled:opacity-50"
+                            className="px-3 py-2 bg-blue-600 hover:bg-blue-700 rounded text-white text-xs disabled:opacity-50"
                         >
                             Send
                         </button>
@@ -2437,14 +2672,15 @@ function RoomPage() {
                         {/* Close button */}
                         <button
                             onClick={() => setViewingStream(null)}
-                            className="absolute top-4 right-4 w-12 h-12 bg-red-600 hover:bg-red-700 rounded-full flex items-center justify-center text-white text-2xl font-bold z-10"
+                            className="absolute top-4 right-4 w-10 h-10 bg-red-600 hover:bg-red-700 rounded-full flex items-center justify-center text-white font-bold z-10"
+                            style={{ fontSize: '16px' }}
                         >
                             ×
                         </button>
 
                         {/* Player name */}
-                        <div className="absolute top-4 left-4 bg-black/50 backdrop-blur-sm rounded-lg px-4 py-2 z-10">
-                            <h3 className="text-white font-bold text-lg">{viewingStream.playerName}'s Screen</h3>
+                        <div className="absolute top-4 left-4 bg-black/50 backdrop-blur-sm rounded-lg px-3 py-1.5 z-10">
+                            <h3 className="text-white font-bold leading-none" style={{ fontSize: '10px' }}>{viewingStream.playerName}'s Screen</h3>
                         </div>
 
                         {/* Video */}
@@ -2467,7 +2703,7 @@ function RoomPage() {
 
 export default function RoomPageWrapper() {
     return (
-        <Suspense fallback={<div className="h-screen w-screen bg-gray-900 flex items-center justify-center text-white">Loading room...</div>}>
+        <Suspense fallback={<div className={`h-screen w-screen bg-gray-900 flex items-center justify-center text-white ${thinSans.className}`}>Loading room...</div>}>
             <RoomPage />
         </Suspense>
     );
