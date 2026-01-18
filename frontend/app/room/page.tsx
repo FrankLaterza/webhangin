@@ -230,13 +230,15 @@ function CatAvatar({
     color,
     animation,
     isMoving,
-    playerName
+    playerName,
+    isFirstPerson
 }: {
     facialFeatures: FacialFeatures;
     color: string;
     animation: AnimationType;
     isMoving: boolean;
     playerName: string;
+    isFirstPerson?: boolean;
 }) {
     const { scene, animations } = useGLTF('/assets/models/TWISTED_cat_character.glb');
     // Clone scene using SkeletonUtils to properly handle SkinnedMeshes (animations)
@@ -316,6 +318,24 @@ function CatAvatar({
         });
     }, [clone, color, eyeTexture, noseTexture, mouthTexture]);
 
+    // Handle Head Visibility for First Person View
+    useEffect(() => {
+        const headBone = clone.getObjectByName('Head') || clone.getObjectByName('head');
+        if (headBone) {
+            if (isFirstPerson) {
+                headBone.scale.set(0, 0, 0);
+            } else {
+                headBone.scale.set(1, 1, 1);
+            }
+        }
+
+        // Hide/Show facial features
+        ['twisted_cat_eyes_mesh', 'twisted_cat_nose_mesh', 'twisted_cat_mouth_mesh'].forEach(name => {
+            const mesh = clone.getObjectByName(name);
+            if (mesh) mesh.visible = !isFirstPerson;
+        });
+    }, [clone, isFirstPerson]);
+
     // Use centralized animation logic
     useCharacterAnimations(actions, mixer, animation, isMoving, playerName);
 
@@ -328,13 +348,15 @@ function AvatarMesh({
     color,
     animation,
     isMoving,
-    playerName
+    playerName,
+    isFirstPerson
 }: {
     facialFeatures: FacialFeatures;
     color: string;
     animation: AnimationType;
     isMoving: boolean;
     playerName: string;
+    isFirstPerson?: boolean;
 }) {
     return (
         <CatAvatar
@@ -343,6 +365,7 @@ function AvatarMesh({
             animation={animation}
             isMoving={isMoving}
             playerName={playerName}
+            isFirstPerson={isFirstPerson}
         />
     );
 }
@@ -462,7 +485,7 @@ function LocalPlayer({
     isCamping?: boolean;
 }) {
     const groupRef = useRef<THREE.Group>(null);
-    const { camera, gl } = useThree();
+    const { camera, gl, scene } = useThree();
     const keysPressed = useRef<Set<string>>(new Set());
     const positionRef = useRef<Position>({ ...player.position });
     const rotationRef = useRef<number>(player.rotation);
@@ -562,6 +585,11 @@ function LocalPlayer({
             if (e.key.toLowerCase() === 't') {
                 cameraOffset.current = { azimuth: 0, elevation: 0, radius: 5 };
             }
+
+            // Toggle First Person
+            if (e.key.toLowerCase() === 'f') {
+                setIsFirstPerson(prev => !prev);
+            }
         };
 
         const handleKeyUp = (e: KeyboardEvent) => {
@@ -589,6 +617,7 @@ function LocalPlayer({
     const [isMoving, setIsMoving] = useState(false);
     const isMovingRef = useRef(false);
     const wasMovingRef = useRef(false);
+    const [isFirstPerson, setIsFirstPerson] = useState(false);
 
     // Initial movement injection ("W tap" workaround for T-pose)
     const [initialInjection, setInitialInjection] = useState(true);
@@ -634,15 +663,36 @@ function LocalPlayer({
             Math.cos(rotationRef.current)
         );
 
+        // Collision Check Helper
+        const canMove = (dir: THREE.Vector3) => {
+            if (isCamping) return true; // Disable collision for camping (splats)
+
+            const startPos = new THREE.Vector3(positionRef.current.x, positionRef.current.y + 0.5, positionRef.current.z);
+            const raycaster = new THREE.Raycaster(startPos, dir, 0, 1.0); // 1 unit reach
+
+            const collisionWorld = scene.getObjectByName('collision-world');
+            if (!collisionWorld) return true; // No world, allow move
+
+            const intersects = raycaster.intersectObject(collisionWorld, true);
+            // If hit is less than 0.5 (radius), block
+            return !intersects.some(hit => hit.distance < 0.8);
+        };
+
         if (keysPressed.current.has('w')) {
-            positionRef.current.x += direction.x * speed;
-            positionRef.current.z += direction.z * speed;
-            moved = true;
+            if (canMove(direction)) {
+                positionRef.current.x += direction.x * speed;
+                positionRef.current.z += direction.z * speed;
+                moved = true;
+            }
         }
         if (keysPressed.current.has('s')) {
-            positionRef.current.x -= direction.x * speed;
-            positionRef.current.z -= direction.z * speed;
-            moved = true;
+            // Backward check (invert direction)
+            const backDir = direction.clone().negate();
+            if (canMove(backDir)) {
+                positionRef.current.x -= direction.x * speed;
+                positionRef.current.z -= direction.z * speed;
+                moved = true;
+            }
         }
 
         // Update walking state
@@ -755,23 +805,51 @@ function LocalPlayer({
         groupRef.current.rotation.y = rotationRef.current;
 
         // --- CAMERA LOGIC ---
-        // Calculate orbit position
-        // Default: Behind player (rotationRef.current + PI)
-        // Offset: cameraOffset.current.azimuth
-        const totalAzimuth = rotationRef.current + Math.PI + cameraOffset.current.azimuth;
-        const totalElevation = cameraOffset.current.elevation;
+        if (isFirstPerson) {
+            // First Person Logic
+            // Position: Eye level (Model is scaled 0.5, feet at -0.5. Head approx at 0.5. Eyes ~0.4)
+            // Forward Offset to avoid chest clipping
+            const forwardOffset = 0.25;
+            const eyeY = positionRef.current.y + 0.4 + heightOffset;
 
-        // Spherical to Cartesian
-        // Radius = 5 (Dynamic)
-        const radius = cameraOffset.current.radius;
-        // y is Up.
-        const camX = positionRef.current.x + radius * Math.sin(totalAzimuth) * Math.cos(totalElevation);
-        const camZ = positionRef.current.z + radius * Math.cos(totalAzimuth) * Math.cos(totalElevation);
-        const camY = positionRef.current.y + 3 + heightOffset * 0.5 + (radius * Math.sin(totalElevation));
+            const camX = positionRef.current.x + Math.sin(rotationRef.current) * forwardOffset;
+            const camZ = positionRef.current.z + Math.cos(rotationRef.current) * forwardOffset;
 
-        // Update camera to follow
-        camera.position.set(camX, camY, camZ);
-        camera.lookAt(positionRef.current.x, positionRef.current.y + heightOffset, positionRef.current.z); // Look slightly higher
+            camera.position.set(camX, eyeY, camZ);
+
+            // Look Direction
+            // Yaw: rotationRef.current (Model forward)
+            // Pitch: cameraOffset.current.elevation
+            const yaw = rotationRef.current;
+            const pitch = cameraOffset.current.elevation;
+
+            // Look at point at distance
+            const lookDist = 5;
+            const lookX = camX + lookDist * Math.sin(yaw) * Math.cos(pitch);
+            const lookZ = camZ + lookDist * Math.cos(yaw) * Math.cos(pitch);
+            const lookY = eyeY + lookDist * Math.sin(pitch);
+
+            camera.lookAt(lookX, lookY, lookZ);
+        } else {
+            // Third Person Orbit Logic
+            // Calculate orbit position
+            // Default: Behind player (rotationRef.current + PI)
+            // Offset: cameraOffset.current.azimuth
+            const totalAzimuth = rotationRef.current + Math.PI + cameraOffset.current.azimuth;
+            const totalElevation = cameraOffset.current.elevation;
+
+            // Spherical to Cartesian
+            // Radius = 5 (Dynamic)
+            const radius = cameraOffset.current.radius;
+            // y is Up.
+            const camX = positionRef.current.x + radius * Math.sin(totalAzimuth) * Math.cos(totalElevation);
+            const camZ = positionRef.current.z + radius * Math.cos(totalAzimuth) * Math.cos(totalElevation);
+            const camY = positionRef.current.y + 3 + heightOffset * 0.5 + (radius * Math.sin(totalElevation));
+
+            // Update camera to follow
+            camera.position.set(camX, camY, camZ);
+            camera.lookAt(positionRef.current.x, positionRef.current.y + heightOffset, positionRef.current.z); // Look slightly higher
+        }
 
         // Animate sprite sheet if talking
         if (isTalking && micTexture) {
@@ -794,6 +872,7 @@ function LocalPlayer({
                 animation={activeAnimation}
                 isMoving={isMoving}
                 playerName={player.name}
+                isFirstPerson={isFirstPerson}
             />
 
             {/* Streaming Screen - floating video display */}
@@ -813,16 +892,18 @@ function LocalPlayer({
                 </Billboard>
             )}
 
-            <Billboard position={[0, 1, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
-                <Text
-                    fontSize={0.3}
-                    color="white"
-                    anchorX="center"
-                    anchorY="bottom"
-                >
-                    {player.name} (you)
-                </Text>
-            </Billboard>
+            {!isFirstPerson && (
+                <Billboard position={[0, 1, 0]} follow={true} lockX={false} lockY={false} lockZ={false}>
+                    <Text
+                        fontSize={0.3}
+                        color="white"
+                        anchorX="center"
+                        anchorY="bottom"
+                    >
+                        {player.name} (you)
+                    </Text>
+                </Billboard>
+            )}
         </group>
     );
 }
@@ -873,6 +954,27 @@ function RoomWalls() {
     );
 }
 
+// Cinema Model
+function CinemaModel() {
+    const { scene } = useGLTF('/assets/cinemamovie_theater_interior.glb');
+
+    useEffect(() => {
+        scene.traverse((c) => {
+            if (c instanceof THREE.Mesh) {
+                c.userData.isCollision = true;
+                // Force One-Way Visibility (Backface Culling)
+                if (c.material) {
+                    c.material.side = THREE.FrontSide;
+                    c.material.shadowSide = THREE.FrontSide;
+                    c.material.needsUpdate = true;
+                }
+            }
+        });
+    }, [scene]);
+
+    return <primitive object={scene} scale={[2, 2, 2]} position={[140, 0.5, 50]} name="collision-world" />;
+}
+
 function RoomPage() {
     const searchParams = useSearchParams();
     const [isConnected, setIsConnected] = useState(false);
@@ -906,12 +1008,14 @@ function RoomPage() {
 
     const peerConnectionConfig: RTCConfiguration = {
         iceServers: [
-            { urls: [
-                'stun:stun.l.google.com:19302',
-                'stun:stun1.l.google.com:19302',
-                'stun:stun2.l.google.com:19302',
-                'stun:stun.cloudflare.com:3478'
-            ]},
+            {
+                urls: [
+                    'stun:stun.l.google.com:19302',
+                    'stun:stun1.l.google.com:19302',
+                    'stun:stun2.l.google.com:19302',
+                    'stun:stun.cloudflare.com:3478'
+                ]
+            },
         ],
     };
 
@@ -1428,6 +1532,10 @@ function RoomPage() {
 
     const currentActivity = localPlayer?.activity || searchParams.get('activity') || '';
     const isCamping = currentActivity.toLowerCase().includes('camping');
+    const isCinema = currentActivity.toLowerCase().includes('watching') ||
+        currentActivity.toLowerCase().includes('movie') ||
+        currentActivity.toLowerCase().includes('judge') ||
+        currentActivity.toLowerCase().includes('judging');
 
     return (
         <>
@@ -1445,6 +1553,8 @@ function RoomPage() {
                         <pointLight position={[0, 4, 0]} intensity={108} />
                         {isCamping ? (
                             <SplatViewer url="/assets/final.ply" position={[-4, -1.2, -4]} rotation={[1, -.015, 0, 0]} scale={[4, 4, 4]} />
+                        ) : isCinema ? (
+                            <CinemaModel />
                         ) : (
                             <>
                                 <RoomFloor />
@@ -1505,45 +1615,47 @@ function RoomPage() {
 
                     {/* Room info overlay */}
                     <div className="absolute top-4 left-4 bg-black/50 backdrop-blur-sm rounded-lg px-4 py-2">
-                    <h2 className="text-white font-bold">{roomTheme || 'Loading...'}</h2>
-                    <p className="text-gray-400 text-sm">{remotePlayers.length + 1} players</p>
-                    <p className="text-gray-500 text-xs mt-1">WASD to move</p>
-                </div>
-
-                {/* Back button */}
-                <a href="/" className="absolute top-4 right-4 text-gray-400 hover:text-white">
-                    ← Leave Room
-                </a>
-            </div>
-
-            {/* Sidebar: Chat & Streams */}
-            <div className="w-80 bg-gray-800 flex flex-col border-l border-gray-700">
-                {/* Streams */}
-                <div className="p-3 border-b border-gray-700">
-                    <div className="flex gap-2 mb-2">
-                        <button
-                            onClick={startStreaming}
-                            className="flex-1 py-2 bg-green-600 hover:bg-green-700 rounded text-sm text-white"
-                        >
-                            🎥 Share Screen
-                        </button>
-                        <button
-                            onClick={stopStreaming}
-                            className="flex-1 py-2 bg-red-600 hover:bg-red-700 rounded text-sm text-white"
-                        >
-                            ⏹ Stop
-                        </button>
+                        <h2 className="text-white font-bold">{roomTheme || 'Loading...'}</h2>
+                        <p className="text-gray-400 text-sm">{remotePlayers.length + 1} players</p>
+                        <p className="text-gray-500 text-xs mt-1">WASD to move</p>
+                        <p className="text-gray-500 text-xs mt-1">t to reset camera</p>
+                        <p className="text-gray-500 text-xs mt-1">f to go first person</p>
                     </div>
 
-                    {/* Microphone controls */}
-                    <div className="flex gap-2 mb-2">
-                        {!isMicActive ? (
+                    {/* Back button */}
+                    <a href="/" className="absolute top-4 right-4 text-gray-400 hover:text-white">
+                        ← Leave Room
+                    </a>
+                </div>
+
+                {/* Sidebar: Chat & Streams */}
+                <div className="w-80 bg-gray-800 flex flex-col border-l border-gray-700">
+                    {/* Streams */}
+                    <div className="p-3 border-b border-gray-700">
+                        <div className="flex gap-2 mb-2">
                             <button
-                                onClick={startMicrophone}
-                                className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm text-white"
+                                onClick={startStreaming}
+                                className="flex-1 py-2 bg-green-600 hover:bg-green-700 rounded text-sm text-white"
                             >
-                                🎤 Start Mic
+                                🎥 Share Screen
                             </button>
+                            <button
+                                onClick={stopStreaming}
+                                className="flex-1 py-2 bg-red-600 hover:bg-red-700 rounded text-sm text-white"
+                            >
+                                ⏹ Stop
+                            </button>
+                        </div>
+
+                        {/* Microphone controls */}
+                        <div className="flex gap-2 mb-2">
+                            {!isMicActive ? (
+                                <button
+                                    onClick={startMicrophone}
+                                    className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm text-white"
+                                >
+                                    🎤 Start Mic
+                                </button>
                             ) : (
                                 <>
                                     <button

@@ -39,6 +39,8 @@ fn activity_to_room(activity: &str) -> (&'static str, &'static str) {
         ("focus-den", "Focus Den")
     } else if activity_lower.contains("game") || activity_lower.contains("gaming") {
         ("gaming-corner", "Gaming Corner")
+    } else if activity_lower.contains("watching") || activity_lower.contains("movie") || activity_lower.contains("judge") || activity_lower.contains("judging") {
+        ("cinema", "Cinema")
     } else {
         ("hangout-hub", "Hangout Hub")
     }
