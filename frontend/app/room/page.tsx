@@ -888,7 +888,13 @@ function RoomPage() {
 
         // Use current hostname for WebSocket connection (works with ngrok)
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const host = window.location.host; // includes port if present
+        let host = window.location.host; // includes port if present
+
+        // If running in dev mode (port 3000), connect to backend on port 3001
+        if (host.includes(':3000')) {
+            host = host.replace(':3000', ':3001');
+        }
+
         const wsUrl = `${protocol}//${host}/stream?${params.toString()}`;
 
         console.log('Connecting to WebSocket:', wsUrl);
