@@ -903,17 +903,62 @@ function RoomPage() {
     const [localVideoStream, setLocalVideoStream] = useState<MediaStream | undefined>(undefined);
     const subscribeTransportReady = useRef<boolean>(false);
     const pendingSubscriptions = useRef<Array<{ publisherId: string, playerId: string }>>([]);
+    const [iceServers, setIceServers] = useState<RTCIceServer[]>([
+        { urls: [
+            'stun:stun.l.google.com:19302',
+            'stun:stun1.l.google.com:19302',
+            'stun:stun2.l.google.com:19302',
+            'stun:stun.cloudflare.com:3478'
+        ]},
+    ]);
 
     const peerConnectionConfig: RTCConfiguration = {
-        iceServers: [
-            { urls: [
-                'stun:stun.l.google.com:19302',
-                'stun:stun1.l.google.com:19302',
-                'stun:stun2.l.google.com:19302',
-                'stun:stun.cloudflare.com:3478'
-            ]},
-        ],
+        iceServers: iceServers,
     };
+
+    // Fetch TURN servers from Xirsys
+    useEffect(() => {
+        const fetchXirsysServers = async () => {
+            try {
+                const xirsysUsername = process.env.NEXT_PUBLIC_XIRSYS_USERNAME;
+                const xirsysSecret = process.env.NEXT_PUBLIC_XIRSYS_SECRET;
+                const xirsysChannel = process.env.NEXT_PUBLIC_XIRSYS_CHANNEL;
+
+                if (!xirsysUsername || !xirsysSecret || !xirsysChannel) {
+                    console.error('❌ Xirsys credentials not found in .env file');
+                    return;
+                }
+
+                const credentials = btoa(`${xirsysUsername}:${xirsysSecret}`);
+
+                const response = await fetch(`https://global.xirsys.net/_turn/${xirsysChannel}`, {
+                    method: 'PUT',
+                    headers: {
+                        'Authorization': `Basic ${credentials}`,
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ format: 'urls' }),
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Xirsys API error: ${response.status}`);
+                }
+
+                const data = await response.json();
+                console.log('🌐 Xirsys TURN servers:', data);
+
+                if (data.v && data.v.iceServers) {
+                    setIceServers(data.v.iceServers);
+                    console.log('✅ Updated ICE servers with Xirsys TURN servers');
+                }
+            } catch (error) {
+                console.error('❌ Failed to fetch Xirsys TURN servers:', error);
+                console.log('⚠️ Falling back to default STUN servers');
+            }
+        };
+
+        fetchXirsysServers();
+    }, []);
 
     const audioAnalyzersRef = useRef<Map<string, AnalyserNode>>(new Map());
     const audioContextRef = useRef<AudioContext | null>(null);
