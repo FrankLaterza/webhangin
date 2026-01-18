@@ -8,8 +8,7 @@ export function RoomEffects({ variant = 'default' }: { variant?: 'default' | 'ca
             <EffectComposer disableNormalPass>
                 <Pixelation granularity={3} />
                 {/* Subtle vignette for default room */}
-                {/* @ts-expect-error postprocessing types */}
-                <Vignette eskil={false} offset={0.1} darkness={0.3} />
+                {/* <Vignette eskil={false} offset={0.1} darkness={0.3} /> */}
             </EffectComposer>
         );
     }
@@ -21,19 +20,15 @@ export function RoomEffects({ variant = 'default' }: { variant?: 'default' | 'ca
             <Pixelation granularity={0} />
 
             {/* Muted Colors (Fall vibes) */}
-            {/* @ts-expect-error postprocessing types */}
-            <HueSaturation saturation={0.2} />
+            {/* <HueSaturation saturation={0.2} /> */}
 
             {/* Warmth (Sepia) */}
-            {/* @ts-expect-error postprocessing types */}
-            <Sepia intensity={0.0} />
+            {/* <Sepia intensity={0.0} /> */}
 
             {/* Cozy Vignette */}
-            {/* @ts-expect-error postprocessing types */}
             {/* <Vignette eskil={false} offset={0.1} darkness={0.5} /> */}
 
             {/* Texture/Grain */}
-            {/* @ts-expect-error postprocessing types */}
             {/* <Noise opacity={0.05} blendFunction={BlendFunction.OVERLAY} /> */}
         </EffectComposer>
     );
